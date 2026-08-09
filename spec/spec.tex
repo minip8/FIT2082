@@ -2,47 +2,48 @@
 \usepackage{array}
 \usepackage{url}
 \author{Matthew Yang}
-\title{Investigating the idk??}
+\title{An Extra Boost to Boosted Models}
 \date{\today}
 \begin{document}
 \maketitle
 \tableofcontents
 \section{Introduction}
 
-Use this section to set the stage for your project. Provide some fundamental background (enough to understand the context of the problem). Cite some very key literature and previous work. Here's an example of how to cite a paper.
+Boosted models typically consist of a sequence of decision trees which attempt to predict the previous tree's errors.
 
-The introduction should introduce the problem and tell me why it is important. It should do so by identifying a research gap or the need for the research.
+Current boosted models are computationally expensive, commonly requiring the utilisation of all the training data at any given time.
+
+Moreover, the structure of current boosted models are largely sequential due to the involvement of decision trees, which significantly slows training speed.
+
+With the ever-growing need to train models on more and more data, we need to look for more computationally efficient alternatives of boosting models.
 
 \section{Aims and Research Questions}
 
-Define what is the overarching goal of your project. Break down this goal in a series of research questions that you want to answer.
+Our research aims to investigate methods of categorising data without an explicit decision tree, whilst still maintaining the structure of a boosted model.
 
-Describe expected outcomes of the research and articulate how they can fill the gap identified earlier.
+We focus particularly on parallel categorisation techniques, which will be benchmarked against current research efficiency and accuracy.
 
 \section{Methodology}
 
-Describe the methods that you will use in answering your research question, and provided references when needed. 
-
-Identify potential obstacles for the research, and briefly describe how you can circumvent such obstacles. For example, if your research relies on mathematical predictions, a computer simulation could be used if the analytical results are not at reach. 
-
 This method briefly outlines how we will investigate our proposed research.
 
-\subsection{}
+\subsection{Replication}
 
+We first attempt to replicate the structure of current state-of-the-art models, to build a baseline for our research.
 
+\subsection{Implementation}
 
-The UCR Time Series Classification Archive~\cite{dau2019ucr}.
+We will mimic the structure of current state-of-the-art models, and make appropriate changes where necessary.
 
-We will implement the proposed
+\subsection{Benchmarking}
 
-
+The UCR Time Series Classification Archive~\cite{dau2019ucr} will provide us with a quantitative analysis of our models' performance against other models.
 
 \section{Timeline}
 
-
 \newcommand{\x}{$\bullet$}
 
-\begin{table}[h]
+\begin{table}[ht]
 \centering
 \setlength{\tabcolsep}{5pt}
 \renewcommand{\arraystretch}{1.25}
