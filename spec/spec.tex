@@ -1,68 +1,143 @@
 \documentclass[a4paper, draft, 12pt]{article}
+% \documentclass[a4paper, 12pt]{article}
 \usepackage{array}
 \usepackage{url}
+\usepackage[hidelinks]{hyperref}
+
+\newcommand{\x}{$\bullet$}
+
 \author{Matthew Yang}
 \title{An Extra Boost to Boosted Models}
 \date{\today}
 \begin{document}
 \maketitle
 \tableofcontents
+
 \section{Introduction}
 
-Boosted models typically consist of a sequence of decision trees which attempt to predict the previous tree's errors.
+Gradient boosted models are built from a sequence of decision trees, where each
+tree is fitted to the residual errors of the ensemble constructed so far rather
+than to the original targets~\cite{friedman2001greedy}. This stage-wise additive
+formulation, together with highly engineered implementations such as
+XGBoost~\cite{chen2016xgboost}, LightGBM~\cite{ke2017lightgbm} and
+CatBoost~\cite{prokhorenkova2018catboost}, has made boosting the default choice
+for tabular prediction tasks, where it remains competitive with, and frequently
+superior to, deep learning~\cite{shwartzziv2022tabular,grinsztajn2022why}.
 
-Current boosted models are computationally expensive, commonly requiring the utilisation of all the training data at any given time.
+Boosted models are, however, computationally expensive to train. Inducing a
+single tree requires evaluating candidate split points over the training set at
+every node, so the cost of each boosting iteration scales with both the number
+of instances and the number of features. Approximate split finding, histogram
+binning, gradient-based sampling and feature bundling all reduce this cost
+substantially~\cite{chen2016xgboost,ke2017lightgbm,friedman2002stochastic}, but
+they lower the constant factor rather than remove the underlying dependence on
+the full training set.
 
-Moreover, the structure of current boosted models are largely sequential due to the involvement of decision trees, which significantly slows training speed.
+Training is also largely sequential. The sequential dependency is intrinsic to
+boosting itself, since the targets of iteration $t$ are defined by the
+predictions of iterations $1,\dots,t-1$; it is compounded by the greedy,
+top-down induction of each individual tree, in which a node cannot be split
+until its parent has been. Existing implementations therefore parallelise
+\emph{within} a boosting iteration, over features or histogram bins, rather than
+across iterations. This stands in contrast to ensembles such as random
+forests~\cite{breiman2001random}, whose members are independent and thus
+embarrassingly parallel, but which forgo the error-correcting behaviour that
+gives boosting its accuracy.
 
-With the ever-growing need to train models on more and more data, we need to look for more computationally efficient alternatives of boosting models.
+With the ever-growing need to train models on larger datasets, more
+computationally efficient alternatives to tree-based boosting are needed.
+
+\section{Background and Related Work}
+
+Boosting originates in the observation that a set of weak learners can be
+combined into an arbitrarily strong one, formalised by
+AdaBoost~\cite{freund1997decision} and later generalised to arbitrary
+differentiable losses as gradient boosting~\cite{friedman2001greedy}. Decision
+trees are the conventional weak learner, but nothing in the gradient boosting
+framework requires them: any learner capable of fitting the negative gradient of
+the loss can be used.
+
+This observation is particularly relevant to time series classification, where
+random-feature methods have shown that the expensive, data-dependent search
+performed by tree induction can often be replaced by cheap, data-independent
+random transformations. ROCKET~\cite{dempster2020rocket} applies a large bank of
+random convolutional kernels followed by a linear classifier, achieving accuracy
+comparable to far more expensive ensembles such as
+HIVE-COTE~\cite{middlehurst2021hivecote2} at a small fraction of the training
+cost. MiniRocket~\cite{dempster2021minirocket} and
+Hydra~\cite{dempster2023hydra} refine this approach further. The underlying
+principle of approximating a costly learned representation with randomised
+features is the same one that motivates random feature approximations to
+kernel machines~\cite{rahimi2007random}, and it is the principle we intend to
+carry into the boosting setting.
 
 \section{Aims and Research Questions}
 
-Our research aims to investigate methods of categorising data without an explicit decision tree, whilst still maintaining the structure of a boosted model.
+This research aims to investigate methods of partitioning data without an
+explicit decision tree, whilst still maintaining the additive, error-correcting
+structure of a boosted model. We focus particularly on partitioning techniques
+that can be evaluated in parallel, and we will benchmark these against current
+methods on both efficiency and accuracy.
 
-We focus particularly on parallel categorisation techniques, which will be benchmarked against current research efficiency and accuracy.
+Specifically, we ask:
+
+\begin{enumerate}
+    \item Can the traditional decision tree used as the weak learner in
+          gradient boosting be replaced by some form of parallel partitioning algorithm?
+    \item What is the resulting effect on training time, and how does this approach scale
+          with the number of training instances?
+    \item What accuracy, if any, is sacrificed relative to state-of-the-art
+          boosted models on standard benchmarks?
+\end{enumerate}
 
 \section{Methodology}
 
-This method briefly outlines how we will investigate our proposed research.
+This section briefly outlines how we will investigate our proposed research.
 
 \subsection{Replication}
 
-We first attempt to replicate the structure of current state-of-the-art models, to build a baseline for our research.
+We first attempt to replicate the structure of current state-of-the-art models,
+in order to establish a baseline against which our own results can be compared.
 
 \subsection{Implementation}
 
-We will mimic the structure of current state-of-the-art models, and make appropriate changes where necessary.
+We will mimic the structure of current state-of-the-art models, replacing the
+tree-based weak learner with a parallel partitioning algorithm and making further
+changes where necessary.
 
 \subsection{Benchmarking}
 
-The UCR Time Series Classification Archive~\cite{dau2019ucr} will provide us with a quantitative analysis of our models' performance against other models.
+The UCR Time Series Classification Archive~\cite{dau2019ucr} will provide a
+quantitative comparison of our models' performance against existing methods,
+using the archive's default train/test splits so that our results are directly
+comparable to published ones~\cite{middlehurst2024bakeoff}. We will report both
+classification accuracy and training time. Accuracy across multiple datasets
+will be compared using the Friedman test with post-hoc pairwise comparisons, as
+recommended by Dem\v{s}ar~\cite{demsar2006statistical}, and summarised with
+critical difference diagrams.
 
 \section{Timeline}
 
-\newcommand{\x}{$\bullet$}
-
 \begin{table}[ht]
-\centering
-\setlength{\tabcolsep}{5pt}
-\renewcommand{\arraystretch}{1.25}
-\begin{tabular}{|l|*{12}{c|}}
-\hline
-Week: & 1 & 2 & 3 & 4 & 5 & 6 & 7 & 8 & 9 & 10 & 11 & 12 \\
-\hline
-Initial meeting                 & - & \x &    &    &    &    &    &    &    &    &    &    \\
-Review of literature            & - &    & \x &    &    &    &    &    &    &    &    &    \\
-Writing proposal                & - &    & \x &    &    &    &    &    &    &    &    &    \\
-Replication of current research & - &    &    & \x &    &    &    &    &    &    &    &    \\
-Implementation of proposal      & - &    &    &    & \x & \x & \x & \x & \x & \x &    &    \\
-Benchmarking models             & - &    &    &    &    & \x & \x & \x & \x & \x & \x &    \\
-Project presentation            & - &    &    &    &    &    &    &    &    &    &    & \x \\
-Final report                    & - &    & \x & \x & \x & \x & \x & \x & \x & \x & \x & \x \\
-\hline
-\end{tabular}
-\caption{Project schedule by week.}
-\label{tab:timeline}
+    \centering
+    \setlength{\tabcolsep}{5pt}
+    \renewcommand{\arraystretch}{1.25}
+    \begin{tabular}{|l|*{12}{c|}}
+        \hline
+        Week:                           & 1  & 2  & 3  & 4  & 5  & 6  & 7  & 8  & 9  & 10 & 11 & 12 \\
+        \hline
+        Initial meeting                 &    & \x &    &    &    &    &    &    &    &    &    &    \\
+        Review of literature            & \x & \x & \x &    &    &    &    &    &    &    &    &    \\
+        Writing proposal                &    & \x & \x &    &    &    &    &    &    &    &    &    \\
+        Replication of current research &    &    &    & \x &    &    &    &    &    &    &    &    \\
+        Implementation of proposal      &    &    &    &    & \x & \x & \x & \x & \x & \x &    &    \\
+        Benchmarking models             &    &    &    &    &    & \x & \x & \x & \x & \x & \x &    \\
+        Project presentation            &    &    &    &    &    &    &    &    &    &    &    & \x \\
+        Final report                    &    &    & \x & \x & \x & \x & \x & \x & \x & \x & \x & \x \\
+        \hline
+    \end{tabular}
+    \caption{Project schedule by week.}
+    \label{tab:timeline}
 \end{table}
 
 \newpage

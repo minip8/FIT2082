@@ -1,3 +1,7 @@
+% ---------------------------------------------------------------------------
+% Benchmark data
+% ---------------------------------------------------------------------------
+
 @article{dau2019ucr,
   author  = {Dau, Hoang Anh and Bagnall, Anthony and Kamgar, Kaveh and
              Yeh, Chin-Chia Michael and Zhu, Yan and Gharghabi, Shaghayegh and
@@ -21,4 +25,183 @@
   howpublished = {\url{https://www.cs.ucr.edu/~eamonn/time_series_data_2018/}},
   month        = oct,
   year         = {2018}
+}
+
+% ---------------------------------------------------------------------------
+% Boosting: foundations
+% ---------------------------------------------------------------------------
+
+@article{freund1997decision,
+  author  = {Freund, Yoav and Schapire, Robert E.},
+  title   = {A Decision-Theoretic Generalization of On-Line Learning and an
+             Application to Boosting},
+  journal = {Journal of Computer and System Sciences},
+  volume  = {55},
+  number  = {1},
+  pages   = {119--139},
+  year    = {1997},
+  doi     = {10.1006/jcss.1997.1504}
+}
+
+@article{friedman2001greedy,
+  author  = {Friedman, Jerome H.},
+  title   = {Greedy Function Approximation: A Gradient Boosting Machine},
+  journal = {The Annals of Statistics},
+  volume  = {29},
+  number  = {5},
+  pages   = {1189--1232},
+  year    = {2001},
+  doi     = {10.1214/aos/1013203451}
+}
+
+@article{friedman2002stochastic,
+  author  = {Friedman, Jerome H.},
+  title   = {Stochastic Gradient Boosting},
+  journal = {Computational Statistics \& Data Analysis},
+  volume  = {38},
+  number  = {4},
+  pages   = {367--378},
+  year    = {2002},
+  doi     = {10.1016/S0167-9473(01)00065-2}
+}
+
+@article{breiman2001random,
+  author  = {Breiman, Leo},
+  title   = {Random Forests},
+  journal = {Machine Learning},
+  volume  = {45},
+  number  = {1},
+  pages   = {5--32},
+  year    = {2001},
+  doi     = {10.1023/A:1010933404324}
+}
+
+% ---------------------------------------------------------------------------
+% Boosting: scalable implementations
+% ---------------------------------------------------------------------------
+
+@inproceedings{chen2016xgboost,
+  author    = {Chen, Tianqi and Guestrin, Carlos},
+  title     = {{XGBoost}: A Scalable Tree Boosting System},
+  booktitle = {Proceedings of the 22nd ACM SIGKDD International Conference on
+               Knowledge Discovery and Data Mining},
+  pages     = {785--794},
+  year      = {2016},
+  doi       = {10.1145/2939672.2939785}
+}
+
+@inproceedings{ke2017lightgbm,
+  author    = {Ke, Guolin and Meng, Qi and Finley, Thomas and Wang, Taifeng and
+               Chen, Wei and Ma, Weidong and Ye, Qiwei and Liu, Tie-Yan},
+  title     = {{LightGBM}: A Highly Efficient Gradient Boosting Decision Tree},
+  booktitle = {Advances in Neural Information Processing Systems 30},
+  pages     = {3146--3154},
+  year      = {2017}
+}
+
+@inproceedings{prokhorenkova2018catboost,
+  author    = {Prokhorenkova, Liudmila and Gusev, Gleb and Vorobev, Aleksandr and
+               Dorogush, Anna Veronika and Gulin, Andrey},
+  title     = {{CatBoost}: Unbiased Boosting with Categorical Features},
+  booktitle = {Advances in Neural Information Processing Systems 31},
+  pages     = {6638--6648},
+  year      = {2018}
+}
+
+% ---------------------------------------------------------------------------
+% Time series classification
+% ---------------------------------------------------------------------------
+
+@article{dempster2020rocket,
+  author  = {Dempster, Angus and Petitjean, Fran\c{c}ois and Webb, Geoffrey I},
+  title   = {{ROCKET}: Exceptionally Fast and Accurate Time Series Classification Using Random Convolutional Kernels},
+  journal = {Data Mining and Knowledge Discovery},
+  year    = {2020},
+  volume  = {34},
+  number  = {5},
+  pages   = {1454--1495}
+}
+
+@inproceedings{dempster2021minirocket,
+  author    = {Dempster, Angus and Schmidt, Daniel F and Webb, Geoffrey I},
+  title     = {{MiniRocket}: A Very Fast (Almost) Deterministic Transform for Time Series Classification},
+  booktitle = {Proceedings of the 27th ACM SIGKDD Conference on Knowledge Discovery and Data Mining},
+  publisher = {ACM},
+  address   = {New York},
+  year      = {2021},
+  pages     = {248--257}
+}
+
+@article{dempster2023hydra,
+  author  = {Dempster, Angus and Schmidt, Daniel F and Webb, Geoffrey I},
+  title   = {Hydra: Competing Convolutional Kernels for Fast and Accurate Time Series Classification},
+  year    = {2023},
+  journal = {Data Mining and Knowledge Discovery},
+  volume  = {37},
+  pages   = {1779--1805},
+}
+
+@article{middlehurst2021hivecote2,
+  author  = {Middlehurst, Matthew and Large, James and Flynn, Michael and
+             Lines, Jason and Bostrom, Aaron and Bagnall, Anthony},
+  title   = {{HIVE-COTE} 2.0: A New Meta Ensemble for Time Series
+             Classification},
+  journal = {Machine Learning},
+  volume  = {110},
+  number  = {11},
+  pages   = {3211--3243},
+  year    = {2021},
+  doi     = {10.1007/s10994-021-06057-9}
+}
+
+@article{middlehurst2024bakeoff,
+  author  = {Middlehurst, Matthew and Sch\"{a}fer, Patrick and Bagnall, Anthony},
+  title   = {Bake off Redux: A Review and Experimental Evaluation of Recent
+             Time Series Classification Algorithms},
+  journal = {Data Mining and Knowledge Discovery},
+  volume  = {38},
+  number  = {4},
+  pages   = {1958--2031},
+  year    = {2024},
+  doi     = {10.1007/s10618-024-01022-1}
+}
+
+% ---------------------------------------------------------------------------
+% Random features, tabular baselines, and evaluation methodology
+% ---------------------------------------------------------------------------
+
+@inproceedings{rahimi2007random,
+  author    = {Rahimi, Ali and Recht, Benjamin},
+  title     = {Random Features for Large-Scale Kernel Machines},
+  booktitle = {Advances in Neural Information Processing Systems 20},
+  pages     = {1177--1184},
+  year      = {2007}
+}
+
+@article{shwartzziv2022tabular,
+  author  = {Shwartz-Ziv, Ravid and Armon, Amitai},
+  title   = {Tabular Data: Deep Learning is Not All You Need},
+  journal = {Information Fusion},
+  volume  = {81},
+  pages   = {84--90},
+  year    = {2022},
+  doi     = {10.1016/j.inffus.2021.11.011}
+}
+
+@inproceedings{grinsztajn2022why,
+  author    = {Grinsztajn, L\'{e}o and Oyallon, Edouard and Varoquaux, Ga\"{e}l},
+  title     = {Why Do Tree-Based Models Still Outperform Deep Learning on
+               Typical Tabular Data?},
+  booktitle = {Advances in Neural Information Processing Systems 35: Datasets
+               and Benchmarks Track},
+  year      = {2022}
+}
+
+@article{demsar2006statistical,
+  author  = {Dem\v{s}ar, Janez},
+  title   = {Statistical Comparisons of Classifiers over Multiple Data Sets},
+  journal = {Journal of Machine Learning Research},
+  volume  = {7},
+  pages   = {1--30},
+  year    = {2006}
 }
