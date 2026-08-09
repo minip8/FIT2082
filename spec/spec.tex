@@ -33,17 +33,6 @@ substantially~\cite{chen2016xgboost,ke2017lightgbm,friedman2002stochastic}, but
 they lower the constant factor rather than remove the underlying dependence on
 the full training set.
 
-Training is also largely sequential. The sequential dependency is intrinsic to
-boosting itself, since the targets of iteration $t$ are defined by the
-predictions of iterations $1,\dots,t-1$; it is compounded by the greedy,
-top-down induction of each individual tree, in which a node cannot be split
-until its parent has been. Existing implementations therefore parallelise
-\emph{within} a boosting iteration, over features or histogram bins, rather
-than across iterations. This stands in contrast to ensembles such as random
-forests~\cite{breiman2001random}, whose members are independent and thus
-embarrassingly parallel, but which forgo the error-correcting behaviour that
-gives boosting its accuracy.
-
 With the ever-growing need to train models on larger datasets, more
 computationally efficient alternatives to tree-based boosting are needed.
 
