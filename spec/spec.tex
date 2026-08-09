@@ -17,8 +17,8 @@
 
 Gradient boosted models are built from a sequence of decision trees, where each
 tree is fitted to the residual errors of the ensemble constructed so far rather
-than to the original targets~\cite{friedman2001greedy}. This stage-wise additive
-formulation, together with highly engineered implementations such as
+than to the original targets~\cite{friedman2001greedy}. This stage-wise
+additive formulation, together with highly engineered implementations such as
 XGBoost~\cite{chen2016xgboost}, LightGBM~\cite{ke2017lightgbm} and
 CatBoost~\cite{prokhorenkova2018catboost}, has made boosting the default choice
 for tabular prediction tasks, where it remains competitive with, and frequently
@@ -38,8 +38,8 @@ boosting itself, since the targets of iteration $t$ are defined by the
 predictions of iterations $1,\dots,t-1$; it is compounded by the greedy,
 top-down induction of each individual tree, in which a node cannot be split
 until its parent has been. Existing implementations therefore parallelise
-\emph{within} a boosting iteration, over features or histogram bins, rather than
-across iterations. This stands in contrast to ensembles such as random
+\emph{within} a boosting iteration, over features or histogram bins, rather
+than across iterations. This stands in contrast to ensembles such as random
 forests~\cite{breiman2001random}, whose members are independent and thus
 embarrassingly parallel, but which forgo the error-correcting behaviour that
 gives boosting its accuracy.
@@ -54,22 +54,22 @@ combined into an arbitrarily strong one, formalised by
 AdaBoost~\cite{freund1997decision} and later generalised to arbitrary
 differentiable losses as gradient boosting~\cite{friedman2001greedy}. Decision
 trees are the conventional weak learner, but nothing in the gradient boosting
-framework requires them: any learner capable of fitting the negative gradient of
-the loss can be used.
+framework requires them: any learner capable of fitting the negative gradient
+of the loss can be used.
 
 This observation is particularly relevant to time series classification, where
 random-feature methods have shown that the expensive, data-dependent search
 performed by tree induction can often be replaced by cheap, data-independent
-random transformations. ROCKET~\cite{dempster2020rocket} applies a large bank of
-random convolutional kernels followed by a linear classifier, achieving accuracy
-comparable to far more expensive ensembles such as
+random transformations. ROCKET~\cite{dempster2020rocket} applies a large bank
+of random convolutional kernels followed by a linear classifier, achieving
+accuracy comparable to far more expensive ensembles such as
 HIVE-COTE~\cite{middlehurst2021hivecote2} at a small fraction of the training
 cost. MiniRocket~\cite{dempster2021minirocket} and
 Hydra~\cite{dempster2023hydra} refine this approach further. The underlying
 principle of approximating a costly learned representation with randomised
-features is the same one that motivates random feature approximations to
-kernel machines~\cite{rahimi2007random}, and it is the principle we intend to
-carry into the boosting setting.
+features is the same one that motivates random feature approximations to kernel
+machines~\cite{rahimi2007random}, and it is the principle we intend to carry
+into the boosting setting.
 
 \section{Aims and Research Questions}
 
@@ -82,12 +82,12 @@ concurrently and averaging their predictions, as in bootstrap aggregating
 Specifically, we ask:
 
 \begin{enumerate}
-    \item Can the decision tree conventionally used as the weak learner in
-          gradient boosting be replaced by a parallelisable partitioning algorithm?
+    \item Can the decision tree conventionally used as the weak learner in gradient
+          boosting be replaced by a parallelisable partitioning algorithm?
     \item What is the resulting effect on training time, and how does this approach scale
           with the number of training instances?
-    \item What accuracy, if any, is sacrificed relative to state-of-the-art
-          boosted models on standard benchmarks?
+    \item What accuracy, if any, is sacrificed relative to state-of-the-art boosted
+          models on standard benchmarks?
 \end{enumerate}
 
 \section{Methodology}
@@ -102,8 +102,8 @@ in order to establish a baseline against which our own results can be compared.
 \subsection{Implementation}
 
 We will mimic the structure of current state-of-the-art models, replacing the
-tree-based weak learner with a parallel partitioning algorithm and making further
-changes where necessary.
+tree-based weak learner with a parallel partitioning algorithm and making
+further changes where necessary.
 
 \subsection{Benchmarking}
 

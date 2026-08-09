@@ -1,0 +1,23 @@
+# latexindent settings for this project.
+#
+# Usage:  latexindent -m -l -w -s spec.tex
+#   -m  enable modifyLineBreaks (required for text wrapping)
+#   -l  read this file (latexindent.yaml in the current directory)
+#   -w  overwrite in place
+#   -s  silent
+#
+# Without -m, latexindent fixes indentation only and leaves line breaks alone.
+
+defaultIndent: "    "
+
+modifyLineBreaks:
+    preserveBlankLines: 1
+    condenseMultipleBlankLinesInto: 1
+
+    textWrapOptions:
+        columns: 80
+        # Break *before* the word that would overflow, so lines stay <= 80.
+        when: before
+        # Leave comment lines alone; they are often deliberately formatted.
+        comments:
+            wrap: 0
