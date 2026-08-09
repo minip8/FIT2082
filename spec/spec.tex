@@ -73,17 +73,17 @@ carry into the boosting setting.
 
 \section{Aims and Research Questions}
 
-This research aims to investigate methods of partitioning data without an
-explicit decision tree, whilst still maintaining the additive, error-correcting
-structure of a boosted model. We focus particularly on partitioning techniques
-that can be evaluated in parallel, and we will benchmark these against current
-methods on both efficiency and accuracy.
+This research aims to investigate how parallelism can be introduced into the
+training of boosted models: first, by partitioning the data without inducing an
+explicit decision tree, and second, by training multiple boosted models
+concurrently and averaging their predictions, as in bootstrap aggregating
+(bagging)~\cite{breiman1996bagging}.
 
 Specifically, we ask:
 
 \begin{enumerate}
-    \item Can the traditional decision tree used as the weak learner in
-          gradient boosting be replaced by some form of parallel partitioning algorithm?
+    \item Can the decision tree conventionally used as the weak learner in
+          gradient boosting be replaced by a parallelisable partitioning algorithm?
     \item What is the resulting effect on training time, and how does this approach scale
           with the number of training instances?
     \item What accuracy, if any, is sacrificed relative to state-of-the-art
