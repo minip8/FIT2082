@@ -7,7 +7,7 @@
 \newcommand{\x}{$\bullet$}
 
 \author{Matthew Yang}
-\title{An Extra Boost to Boosted Models}
+\title{Global Partitions for Boosting Time Series Classification}
 \date{\today}
 \begin{document}
 \maketitle
@@ -62,17 +62,15 @@ into the boosting setting.
 
 \section{Aims and Research Questions}
 
-This research aims to investigate how parallelism can be introduced into the
-training of boosted models: first, by partitioning the data without inducing an
-explicit decision tree, and second, by training multiple boosted models
-concurrently and averaging their predictions, as in bootstrap aggregating
-(bagging)~\cite{breiman1996bagging}.
+This research aims to investigate how memory efficient approaches can be
+introduced into the training of boosted models by partitioning the data without
+inducing an explicit decision tree.
 
 Specifically, we ask:
 
 \begin{enumerate}
     \item Can the decision tree conventionally used as the weak learner in gradient
-          boosting be replaced by a parallelisable partitioning algorithm?
+          boosting be replaced by a flat partitioning algorithm?
     \item What is the resulting effect on training time, and how does this approach scale
           with the number of training instances?
     \item What accuracy, if any, is sacrificed relative to state-of-the-art boosted
@@ -91,8 +89,8 @@ in order to establish a baseline against which our own results can be compared.
 \subsection{Implementation}
 
 We will mimic the structure of current state-of-the-art models, replacing the
-tree-based weak learner with a parallel partitioning algorithm and making
-further changes where necessary.
+tree-based weak learner with a flat partitioning algorithm and making further
+changes where necessary.
 
 \subsection{Benchmarking}
 
