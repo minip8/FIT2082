@@ -53,11 +53,17 @@ of random convolutional kernels followed by a linear classifier, achieving
 accuracy comparable to far more expensive ensembles such as
 HIVE-COTE~\cite{middlehurst2021hivecote2} at a small fraction of the training
 cost. MiniRocket~\cite{dempster2021minirocket} and
-Hydra~\cite{dempster2023hydra} refine this approach further. The underlying
-principle of approximating a costly learned representation with randomised
-features is the same one that motivates random feature approximations to kernel
-machines~\cite{rahimi2007random}, and it is the principle we intend to carry
-into the boosting setting.
+Hydra~\cite{dempster2023hydra} refine this approach further.
+
+A parallel line of work extracts features from intervals of the series rather
+than from convolutions. Time Series Forest~\cite{deng2013tsf} computes simple
+summary statistics over randomly selected intervals and passes them to a tree
+ensemble, and this idea has been further explored through
+CIF~\cite{middlehurst2020cif}, DrCIF~\cite{middlehurst2021hivecote2},
+QUANT~\cite{dempster2024quant}, rSTSF~\cite{cabello2021rstsf},and
+PULSAR~\cite{pulsar}. These methods are notable here because the classifier
+applied to the resulting features includes some form of a tree, which we hope
+can be replaced by a cheaper alternative without the loss of accuracy.
 
 \section{Aims and Research Questions}
 
