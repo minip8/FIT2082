@@ -3,12 +3,14 @@
 # Highly Scalable Time Series Classification for Very Large Datasets
 # AALTD 2024 (ECML PKDD 2024)
 
+from typing import Any
+
 import numpy as np
 import torch
 
 # == Dataset ===================================================================
 
-class Dataset():
+class Dataset:
 
     def __init__(self, path_X, path_Y, batch_size = 256, shuffle = True, **kwargs):
 
@@ -19,8 +21,8 @@ class Dataset():
 
         self._shuffle = shuffle
 
-        self._mmap_X = np.load(path_X, mmap_mode = "r")
-        self._mmap_Y = np.load(path_Y, mmap_mode = "r")
+        self._mmap_X: Any = np.load(path_X, mmap_mode = "r")
+        self._mmap_Y: Any = np.load(path_Y, mmap_mode = "r")
 
         self._indices = kwargs.get("indices", torch.arange(self._mmap_X.shape[0]))
 
