@@ -10,9 +10,9 @@ import torch
 
 # == Dataset ===================================================================
 
-class Dataset:
 
-    def __init__(self, path_X, path_Y, batch_size = 256, shuffle = True, **kwargs):
+class Dataset:
+    def __init__(self, path_X, path_Y, batch_size=256, shuffle=True, **kwargs):
 
         self.path_X = path_X
         self.path_Y = path_Y
@@ -21,8 +21,8 @@ class Dataset:
 
         self._shuffle = shuffle
 
-        self._mmap_X: Any = np.load(path_X, mmap_mode = "r")
-        self._mmap_Y: Any = np.load(path_Y, mmap_mode = "r")
+        self._mmap_X: Any = np.load(path_X, mmap_mode="r")
+        self._mmap_Y: Any = np.load(path_Y, mmap_mode="r")
 
         self._indices = kwargs.get("indices", torch.arange(self._mmap_X.shape[0]))
 
@@ -32,34 +32,31 @@ class Dataset:
 
     def __getitem__(self, key):
 
-        return \
-            Dataset(
-                path_X     = self.path_X,
-                path_Y     = self.path_Y,
-                batch_size = self.batch_size,
-                shuffle    = self._shuffle,
-                indices    = self._indices[key],
-            )
-    
+        return Dataset(
+            path_X=self.path_X,
+            path_Y=self.path_Y,
+            batch_size=self.batch_size,
+            shuffle=self._shuffle,
+            indices=self._indices[key],
+        )
+
     def open(self):
 
         if not self.is_open:
-
-            self._mmap_X = np.load(self.path_X, mmap_mode = "r")
-            self._mmap_Y = np.load(self.path_Y, mmap_mode = "r")
+            self._mmap_X = np.load(self.path_X, mmap_mode="r")
+            self._mmap_Y = np.load(self.path_Y, mmap_mode="r")
 
             self.is_open = True
 
     def close(self):
 
         if self.is_open:
-
             self._mmap_X._mmap.close()
             self._mmap_Y._mmap.close()
 
             del self._mmap_X
             del self._mmap_Y
-            
+
             self._mmap_X = None
             self._mmap_Y = None
 
@@ -76,9 +73,9 @@ class Dataset:
     def shape(self):
 
         self.open()
-        
+
         return self._indices.shape[0], *self._mmap_X.shape[1:]
-    
+
     def _reset(self):
 
         if self._shuffle:
@@ -102,7 +99,6 @@ class Dataset:
         self.open()
 
         if self._batch_index < self._num_batches:
-
             X = self._mmap_X[self._indices[self._batches[self._batch_index]]]
             Y = self._mmap_Y[self._indices[self._batches[self._batch_index]]]
 
@@ -113,9 +109,8 @@ class Dataset:
             self._batch_index += 1
 
             return X, Y
-        
+
         else:
-            
             raise StopIteration
 
     @property
