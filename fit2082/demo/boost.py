@@ -1,14 +1,14 @@
 import numpy as np
-
 from numba import njit, prange
-from numba.types import i4, f4
-from numba.typed import List
+
+# from numba.typed import List
+# from numba.types import f4, i4
 
 # ==============================================================================
 # == Boosting Class ============================================================
 # ==============================================================================
 
-class NewHashBoost():
+class NewHashBoost:
 
     # num_classes : num classes
     # num_pairs_per_hash : num bits per hash; uses pairs of points to determine split points/partitions
@@ -107,10 +107,10 @@ def _one_hot0(Y, num_classes):
 
 # -- cross entropy -------------------------------------------------------------
 
-@njit(f"f4[:](f4[:,:],i4[:])", fastmath = True, cache = True)
+@njit("f4[:](f4[:,:],i4[:])", fastmath = True, cache = True)
 def _cross_entropy(Z, Y):
 
-    n, p = Z.shape
+    n, _p = Z.shape
 
     ce = np.zeros(n, dtype = np.float32)
 
@@ -123,7 +123,7 @@ def _cross_entropy(Z, Y):
 
 # -- softmax -------------------------------------------------------------------
 
-@njit(f"f4[:,:](f4[:,:])", fastmath = True, cache = True)
+@njit("f4[:,:](f4[:,:])", fastmath = True, cache = True)
 def _softmax0(X):
 
     num_examples, k = X.shape
@@ -134,8 +134,7 @@ def _softmax0(X):
 
         max_value = X[i, 0]
         for c in range(1, k):
-            if X[i, c] > max_value:
-                max_value = X[i, c]
+            max_value = max(max_value, X[i, c])
         
         sum_exp = np.float32(0)
         for c in range(k):
@@ -149,7 +148,7 @@ def _softmax0(X):
 
 # -- convert base 2 -> base 10 -------------------------------------------------
 
-@njit(f"i4[:](b1[:,:])", fastmath = True, cache = True)
+@njit("i4[:](b1[:,:])", fastmath = True, cache = True)
 def _base10_0(b2):
 
     n, p = b2.shape
@@ -167,7 +166,7 @@ def _base10_0(b2):
 
 # -- predict single hash -------------------------------------------------------
 
-@njit(f"void(f4[:,:],i4[:],f4[:],f4[:,:],f4[:,:])", fastmath = True, cache = True)
+@njit("void(f4[:,:],i4[:],f4[:],f4[:,:],f4[:,:])", fastmath = True, cache = True)
 def _predict_single0(X, feature_indices, midpoints, logits0, buffer):
 
     n = X.shape[0]
@@ -185,14 +184,14 @@ def _predict_single0(X, feature_indices, midpoints, logits0, buffer):
 
 # -- predict multiple hashes ---------------------------------------------------
 
-@njit(f"f4[:,:](f4[:,:],i4[:,:],f4[:,:],i4,i4,f4[:,:,:])", fastmath = True, cache = True, parallel = True)
+@njit("f4[:,:](f4[:,:],i4[:,:],f4[:,:],i4,i4,f4[:,:,:])", fastmath = True, cache = True, parallel = True)
 def _predict_multi0(X, feature_indices, midpoints, num_rounds, num_classes, logits0):
 
     n = X.shape[0]
 
     P = np.zeros((n, num_classes), dtype = np.float32)
 
-    for r in prange(num_rounds):
+    for r in prange(num_rounds):  # ty: ignore[not-iterable]
 
         buffer = np.zeros((n, num_classes), dtype = np.float32)
 
@@ -210,7 +209,7 @@ def _predict_multi0(X, feature_indices, midpoints, num_rounds, num_classes, logi
 
 # -- predict multiple hashes (keep all results separately) ---------------------
 
-@njit(f"f4[:,:,:](f4[:,:],i4[:,:],f4[:,:],i4,i4,f4[:,:,:])", fastmath = True, cache = True, parallel = True)
+@njit("f4[:,:,:](f4[:,:],i4[:,:],f4[:,:],i4,i4,f4[:,:,:])", fastmath = True, cache = True, parallel = True)
 def _predict_multi_all0(X, feature_indices, midpoints, num_rounds,  num_classes, logits0):
 
     n = X.shape[0]
@@ -224,7 +223,7 @@ def _predict_multi_all0(X, feature_indices, midpoints, num_rounds,  num_classes,
 
     buffer = np.zeros((num_rounds, n, num_classes), dtype = np.float32)
 
-    for r in prange(num_rounds):
+    for r in prange(num_rounds):  # ty: ignore[not-iterable]
 
         _predict_single0(
             X = X,
@@ -240,7 +239,7 @@ def _predict_multi_all0(X, feature_indices, midpoints, num_rounds,  num_classes,
 
 # -- update single hash --------------------------------------------------------
 
-@njit(f"void(f4[:,:],f4[:,:],f4[:,:],i4[:],f4[:],i4,f4[:,:],f4[:,:],f4,f4[:,:],f4[:,:],f4[:,:],b1[:])", fastmath = True, cache = True)
+@njit("void(f4[:,:],f4[:,:],f4[:,:],i4[:],f4[:],i4,f4[:,:],f4[:,:],f4,f4[:,:],f4[:,:],f4[:,:],b1[:])", fastmath = True, cache = True)
 def _update_single0(X, buffer_residuals, buffer_hessian, feature_indices, midpoints, num_classes, residuals, hessian, lr, logits0, RR, HH, visited):
 
     num_examples = X.shape[0]
@@ -290,12 +289,12 @@ def _update_single0(X, buffer_residuals, buffer_hessian, feature_indices, midpoi
 
 # -- predict all hashes --------------------------------------------------------
 
-@njit(f"void(f4[:,:],f4[:,:,:],f4[:,:,:],i4[:,:],f4[:,:],i4,f4[:,:],f4[:,:],f4,i4,f4[:,:,:])", fastmath = True, cache = True, parallel = True)
+@njit("void(f4[:,:],f4[:,:,:],f4[:,:,:],i4[:,:],f4[:,:],i4,f4[:,:],f4[:,:],f4,i4,f4[:,:,:])", fastmath = True, cache = True, parallel = True)
 def _update_multi0(X, buffer_residuals, buffer_hessian, feature_indices, midpoints, num_classes, residuals, hessian, lr, num_rounds, logits0):
 
     hash_size = buffer_residuals.shape[1]
 
-    for r in prange(num_rounds):
+    for r in prange(num_rounds):  # ty: ignore[not-iterable]
 
         RR0 = np.empty((hash_size, num_classes), dtype = np.float32)
         HH0 = np.empty((hash_size, num_classes), dtype = np.float32)
@@ -323,7 +322,7 @@ def _update_multi0(X, buffer_residuals, buffer_hessian, feature_indices, midpoin
 
 # -- form pairs of points for establishing partitions --------------------------
 
-@njit(f"i4[:,:](i4[:],i4[:],i4)", fastmath = True, cache = True)
+@njit("i4[:,:](i4[:],i4[:],i4)", fastmath = True, cache = True)
 def _pair(Y, order, num_pairs):
 
     num_examples = Y.shape[0]
@@ -368,10 +367,10 @@ def _pair(Y, order, num_pairs):
 
 # -- pairs -> partitions -------------------------------------------------------
 
-@njit(f"Tuple((i4[:],f4[:]))(f4[:,:],i4[:,:])", fastmath = True, cache = True)
+@njit("Tuple((i4[:],f4[:]))(f4[:,:],i4[:,:])", fastmath = True, cache = True)
 def _assign(X, pairs_indices):
 
-    num_examples, num_features = X.shape
+    _num_examples, num_features = X.shape
 
     num_pairs = pairs_indices.shape[0]
 
@@ -399,7 +398,7 @@ def _assign(X, pairs_indices):
 
 # -- fit a new hash (single round of boosting) ---------------------------------
 
-@njit(f"Tuple((i4[:],f4[:]))(f4[:,:],i4[:],f4[:,:],f4[:,:],i4,f4[:,:],f4[:,:],f4,i4,f4[:,:],f4[:,:])", fastmath = True, cache = True)
+@njit("Tuple((i4[:],f4[:]))(f4[:,:],i4[:],f4[:,:],f4[:,:],i4,f4[:,:],f4[:,:],f4,i4,f4[:,:],f4[:,:])", fastmath = True, cache = True)
 def _fit_new_hash0(X, Y, buffer_residuals, buffer_hessian, num_classes, residuals, hessian, lr, num_pairs_per_hash, logits0, pred_prob):
 
     num_examples = X.shape[0]
@@ -447,7 +446,7 @@ def _fit_new_hash0(X, Y, buffer_residuals, buffer_hessian, num_classes, residual
 
 # -- fit new (mini)batch of data: (a) update existing; and (b) fit new ---------
 
-@njit(f"void(f4[:,:],i4[:],f4[:,:,:],f4[:,:,:],i4[:,:],f4[:,:],i4,i4,f4,i4,f4[:,:,:])", fastmath = True, cache = True)
+@njit("void(f4[:,:],i4[:],f4[:,:,:],f4[:,:,:],i4[:,:],f4[:,:],i4,i4,f4,i4,f4[:,:,:])", fastmath = True, cache = True)
 def _fit_batch0(X, Y, buffer_residuals, buffer_hessian, feature_indices, midpoints, num_classes, num_rounds, lr, num_pairs_per_hash, logits0):
 
     # get predictions for current (mini)batch
