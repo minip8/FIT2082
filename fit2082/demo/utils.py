@@ -30,7 +30,7 @@ class Dataset:
 
         # self._reset()
 
-    def __getitem__(self, key):
+    def __getitem__(self, key) -> "Dataset":
 
         return Dataset(
             path_X=self.path_X,
