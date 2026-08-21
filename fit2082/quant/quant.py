@@ -7,20 +7,39 @@
 # QUANT: A Minimalist Interval Method for Time Series Classification
 # ECML PKDD 2024
 
+from collections.abc import Callable, Iterable, Iterator
+from typing import Any, Protocol
+
 import numpy as np
+import numpy.typing as npt
 import torch
 import torch.nn.functional as F
 from sklearn.ensemble import ExtraTreesClassifier
 from tqdm import tqdm
 
+# == types =====================================================================
+
+Batch = tuple[npt.NDArray[Any], npt.NDArray[Any]]
+
+
+class TrainingData(Protocol):
+    """Batched dataset as consumed by QuantClassifier.fit."""
+
+    _num_batches: int
+
+    def set_batch_size(self, limit_mb: int) -> None: ...
+
+    def __iter__(self) -> Iterator[Batch]: ...
+
+
 # == eps =======================================================================
 
-eps = torch.finfo(torch.float32).eps
+eps: float = torch.finfo(torch.float32).eps
 
 # == generate intervals ========================================================
 
 
-def make_intervals(input_length, depth):
+def make_intervals(input_length: int, depth: int) -> torch.Tensor:
 
     exponent = min(depth, int(np.log2(input_length)) + 1)
 
@@ -44,7 +63,7 @@ def make_intervals(input_length, depth):
 # == quantile function =========================================================
 
 
-def f_quantile(X, div=4):
+def f_quantile(X: torch.Tensor, div: int = 4) -> torch.Tensor:
 
     n = X.shape[-1]
 
@@ -65,7 +84,7 @@ def f_quantile(X, div=4):
             quantiles = X.quantile(torch.linspace(0, 1, num_quantiles), dim=-1).permute(
                 1, 2, 0
             )
-            quantiles[..., 1::2] = quantiles[..., 1::2] - X.mean(-1, keepdims=True)
+            quantiles[..., 1::2] = quantiles[..., 1::2] - X.mean(-1, keepdim=True)
 
             return quantiles.view(
                 quantiles.shape[0], 1, quantiles.shape[1] * quantiles.shape[2]
@@ -76,7 +95,7 @@ def f_quantile(X, div=4):
 
 
 class IntervalModel:
-    def __init__(self, input_length, depth=6, div=4):
+    def __init__(self, input_length: int, depth: int = 6, div: int = 4) -> None:
 
         assert div >= 1
         assert depth >= 1
@@ -88,11 +107,11 @@ class IntervalModel:
             depth=depth,
         )
 
-    def fit(self, X, Y):
+    def fit(self, X: torch.Tensor, Y: npt.NDArray[Any]) -> None:
 
         pass
 
-    def transform(self, X):
+    def transform(self, X: torch.Tensor) -> torch.Tensor:
 
         features = []
 
@@ -101,7 +120,7 @@ class IntervalModel:
 
         return torch.cat(features, -1)
 
-    def fit_transform(self, X, Y):
+    def fit_transform(self, X: torch.Tensor, Y: npt.NDArray[Any]) -> torch.Tensor:
 
         self.fit(X, Y)
 
@@ -112,7 +131,7 @@ class IntervalModel:
 
 
 class Quant:
-    def __init__(self, depth=6, div=4):
+    def __init__(self, depth: int = 6, div: int = 4) -> None:
 
         assert depth >= 1
         assert div >= 1
@@ -120,18 +139,20 @@ class Quant:
         self.depth = depth
         self.div = div
 
-        self.representation_functions = (
+        self.representation_functions: tuple[
+            Callable[[torch.Tensor], torch.Tensor], ...
+        ] = (
             lambda X: X,
             lambda X: F.avg_pool1d(F.pad(X.diff(), (2, 2), "replicate"), 5, 1),
             lambda X: X.diff(n=2),
             lambda X: torch.fft.rfft(X).abs(),
         )
 
-        self.models = {}
+        self.models: dict[int, IntervalModel] = {}
 
         self.fitted = False
 
-    def transform(self, X):
+    def transform(self, X: torch.Tensor) -> torch.Tensor:
 
         assert self.fitted, "not fitted"
 
@@ -144,7 +165,7 @@ class Quant:
 
         return torch.cat(features, -1)
 
-    def fit_transform(self, X, Y):
+    def fit_transform(self, X: torch.Tensor, Y: npt.NDArray[Any]) -> torch.Tensor:
 
         features = []
 
@@ -166,7 +187,7 @@ class Quant:
 
 
 class QuantClassifier:
-    def __init__(self, num_estimators=200, **kwargs):
+    def __init__(self, num_estimators: int = 200, **kwargs: Any) -> None:
 
         self.transform = Quant()
 
@@ -182,13 +203,13 @@ class QuantClassifier:
             warm_start=True,
         )
 
-        self.verbose = kwargs.get("verbose", False)
+        self.verbose: bool = kwargs.get("verbose", False)
 
-        self._limit_mb = kwargs.get("limit_mb", 100)
+        self._limit_mb: int = kwargs.get("limit_mb", 100)
 
         self._is_fitted = False
 
-    def fit(self, training_data):
+    def fit(self, training_data: TrainingData) -> None:
 
         training_data.set_batch_size(self._limit_mb)
 
@@ -214,7 +235,7 @@ class QuantClassifier:
 
         self._is_fitted = True
 
-    def _set_num_estimators(self, num_batches):
+    def _set_num_estimators(self, num_batches: int) -> npt.NDArray[np.int32]:
 
         num_estimators_per = max(1, int(self.num_estimators / num_batches))
 
@@ -229,7 +250,7 @@ class QuantClassifier:
 
         return num_estimators_per_batch
 
-    def score(self, data):
+    def score(self, data: Iterable[Batch]) -> float:
 
         assert self._is_fitted
 
@@ -244,12 +265,12 @@ class QuantClassifier:
 
         return num_incorrect / count
 
-    def score_logloss(self, data):
+    def score_logloss(self, data: Iterable[Batch]) -> tuple[float, torch.Tensor]:
 
         assert self._is_fitted
 
         num_incorrect = 0
-        loss = 0
+        loss: torch.Tensor = torch.zeros(())
         count = 0
 
         for X, Y in data:
