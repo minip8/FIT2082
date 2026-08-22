@@ -109,7 +109,7 @@ class IntervalModel:
             depth=depth,
         )
 
-    def fit(self, X: torch.Tensor, Y: npt.NDArray[Any]) -> None:
+    def fit(self, X: torch.Tensor, Y: npt.NDArray[Any] | None = None) -> None:
 
         pass
 
@@ -122,7 +122,9 @@ class IntervalModel:
 
         return torch.cat(features, -1)
 
-    def fit_transform(self, X: torch.Tensor, Y: npt.NDArray[Any]) -> torch.Tensor:
+    def fit_transform(
+        self, X: torch.Tensor, Y: npt.NDArray[Any] | None = None
+    ) -> torch.Tensor:
 
         self.fit(X, Y)
 
@@ -167,7 +169,9 @@ class Quant:
 
         return torch.cat(features, -1)
 
-    def fit_transform(self, X: torch.Tensor, Y: npt.NDArray[Any]) -> torch.Tensor:
+    def fit_transform(
+        self, X: torch.Tensor, Y: npt.NDArray[Any] | None = None
+    ) -> torch.Tensor:
 
         features = []
 
