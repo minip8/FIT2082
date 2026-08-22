@@ -5,7 +5,8 @@ and chunked so peak memory stays bounded.
 
 Layout notes (these are load-bearing -- see the comments at each use site):
 
-* Hash codes are stored **round-major** `(rounds, n)`.
+* Hash codes are stored **round-major** `(rounds, n)`; they come from a
+  `Partitioner` (`fit2082.boost.partition`), which owns the split parameters.
 * `stats` fuses the residual numerator and hessian denominator into one tensor
   so a single scatter updates both.
 * Prediction indexes a re-based table slice and so uses **chunk-local** offsets;
@@ -14,26 +15,6 @@ Layout notes (these are load-bearing -- see the comments at each use site):
 
 import torch
 import torch.nn.functional as F
-
-# == encoding ==================================================================
-
-
-def encode_chunk(
-    Xt: torch.Tensor,
-    feature_indices: torch.Tensor,
-    midpoints: torch.Tensor,
-    weights: torch.Tensor,
-) -> torch.Tensor:
-    """(p, n) feature-major X + (c, B) splits -> (c, n) int32 hash codes.
-
-    Kept at module scope so it can be handed to `torch.compile`, which fuses the
-    gather, the comparison and the bit-packing into a single kernel.
-    """
-
-    bits = Xt[feature_indices] <= midpoints[:, :, None]  # (c, B, n)
-
-    return (bits.to(torch.int32) * weights[None, :, None]).sum(1)
-
 
 # == tables ====================================================================
 
@@ -49,9 +30,9 @@ class HashTables:
         lr: float,
         device: torch.device,
         hessian_eps: float = 1e-6,
+        neighbour_shrinkage: float = 0.0,
         round_chunk: int | None = None,
         chunk_budget_bytes: int = 128 << 20,
-        compile: bool = False,
     ) -> None:
 
         self.num_classes = num_classes
@@ -61,8 +42,10 @@ class HashTables:
         self.lr = lr
         self.device = device
         self.hessian_eps = hessian_eps
+        self.neighbour_shrinkage = neighbour_shrinkage
 
         self._round_chunk = round_chunk
+        self._refresh_chunk = 128
         self._chunk_budget_bytes = chunk_budget_bytes
 
         k = num_classes
@@ -76,17 +59,13 @@ class HashTables:
         self.stats = torch.zeros((m, s, 2 * k), dtype=torch.float32, device=device)
         self.logits = torch.zeros((m, s, k), dtype=torch.float32, device=device)
 
-        self.feature_indices = torch.zeros(
-            (m, num_bits), dtype=torch.int64, device=device
-        )
-        self.midpoints = torch.zeros((m, num_bits), dtype=torch.float32, device=device)
-
-        self.weights = (2 ** torch.arange(num_bits, device=device)).to(torch.int32)
         self.offsets = torch.arange(m, device=device, dtype=torch.int64) * s
 
-        self._encode = (
-            torch.compile(encode_chunk, dynamic=True) if compile else encode_chunk
-        )
+        # Bucket i's Hamming neighbours: the same partition with one bit
+        # flipped. Only meaningful because the partition is a flat hypercube --
+        # a tree has no equivalent "one split coarser" sibling.
+        bucket = torch.arange(s, device=device)
+        self.neighbours = torch.stack([bucket ^ (1 << b) for b in range(num_bits)])
 
     # -- chunking --------------------------------------------------------------
 
@@ -104,25 +83,6 @@ class HashTables:
         per_round = num_examples * 2 * self.num_classes * 4
 
         return max(8, min(256, self._chunk_budget_bytes // max(1, per_round)))
-
-    # -- encode ----------------------------------------------------------------
-
-    def encode(self, Xt: torch.Tensor, lo: int, hi: int) -> torch.Tensor:
-        """-> (hi - lo, n) int32 hash codes for rounds [lo, hi)."""
-
-        n = Xt.shape[1]
-        chunk = self.round_chunk(n)
-
-        codes = torch.empty((hi - lo, n), dtype=torch.int32, device=self.device)
-
-        for a in range(lo, hi, chunk):
-            b = min(a + chunk, hi)
-
-            codes[a - lo : b - lo] = self._encode(
-                Xt, self.feature_indices[a:b], self.midpoints[a:b], self.weights
-            )
-
-        return codes
 
     # -- predict ---------------------------------------------------------------
 
@@ -184,16 +144,45 @@ class HashTables:
         untouched bucket's numerator and denominator are unchanged, so it lands
         on the identical value. Skipping them would be an optimisation, not a
         semantic difference -- and the dense form is far faster here.
+
+        With `neighbour_shrinkage` > 0 each bucket's statistics are first mixed
+        with the mean of its `num_bits` Hamming neighbours. Most buckets are
+        empty -- typically ~203 of 256 on real data -- and an empty bucket
+        contributes exactly zero, so an example whose code was never populated
+        gets nothing from that round. Mixing in the neighbours, which differ by
+        exactly one split and are the nearest available evidence, lets those
+        buckets say something. It does not shrink leaf magnitudes.
         """
 
         k = self.num_classes
 
-        numerator = self.stats[:num_rounds, :, :k]
-        denominator = self.stats[:num_rounds, :, k:]
+        if not self.neighbour_shrinkage:
+            numerator = self.stats[:num_rounds, :, :k]
+            denominator = self.stats[:num_rounds, :, k:]
 
-        self.logits[:num_rounds] = (
-            numerator / (denominator + self.hessian_eps) * self.lr
-        )
+            self.logits[:num_rounds] = (
+                numerator / (denominator + self.hessian_eps) * self.lr
+            )
+
+            return
+
+        alpha = self.neighbour_shrinkage
+
+        # chunked over rounds: the pooled copy is the same size as the slice
+        for a in range(0, num_rounds, self._refresh_chunk):
+            b = min(a + self._refresh_chunk, num_rounds)
+
+            block = self.stats[a:b]
+
+            pooled = torch.zeros_like(block)
+            for j in range(self.num_bits):
+                pooled += block[:, self.neighbours[j], :]
+
+            smoothed = (1 - alpha) * block + (alpha / self.num_bits) * pooled
+
+            self.logits[a:b] = (
+                smoothed[..., :k] / (smoothed[..., k:] + self.hessian_eps) * self.lr
+            )
 
     # -- per-round contributions ----------------------------------------------
 

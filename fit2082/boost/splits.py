@@ -22,9 +22,16 @@ class Splitter(Protocol):
         X: torch.Tensor,
         Y: torch.Tensor,
         probabilities: torch.Tensor,
+        gradient: torch.Tensor,
+        hessian: torch.Tensor,
         num_bits: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """-> (feature_indices (num_bits,) int64, midpoints (num_bits,) float32)."""
+        """-> (feature_indices (num_bits,) int64, midpoints (num_bits,) float32).
+
+        `gradient` and `hessian` are passed even though the default splitter
+        ignores them: a gain-based splitter needs them, and recomputing them
+        would duplicate the objective.
+        """
         ...
 
 
@@ -98,6 +105,8 @@ class HardPairSplitter:
         X: torch.Tensor,
         Y: torch.Tensor,
         probabilities: torch.Tensor,
+        gradient: torch.Tensor,
+        hessian: torch.Tensor,
         num_bits: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
 
