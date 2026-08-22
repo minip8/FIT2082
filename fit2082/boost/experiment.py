@@ -133,6 +133,15 @@ VARIANTS: dict[str, dict[str, Any]] = {
     # bagging: the control for capacity_N at matched total hashes
     "bagged_2": {"estimators": 2},
     "bagged_4": {"estimators": 4},
+    # combinations: bagging divides the quadratic round cost by E, so it buys
+    # total hashes far more cheaply than a single deep model
+    "bagged_4_capacity_2": {"estimators": 4, "hashes_per_round": 2},
+    "smooth_0.3_bagged_4": {"neighbour_shrinkage": 0.3, "estimators": 4},
+    "smooth_0.3_bagged_4_capacity_2": {
+        "neighbour_shrinkage": 0.3,
+        "estimators": 4,
+        "hashes_per_round": 2,
+    },
     # measured as noise or worse -- kept so the negative results are reproducible
     "leaf_l2_10": {"hessian_eps": 10.0},
     "bits_6": {"num_bits": 6},
