@@ -74,16 +74,18 @@ def f_quantile(X: torch.Tensor, div: int = 4) -> torch.Tensor:
         num_quantiles = 1 + (n - 1) // div
 
         if num_quantiles == 1:
-            quantiles = X.quantile(torch.tensor([0.5]), dim=-1).permute(1, 2, 0)
+            quantiles = X.quantile(
+                torch.tensor([0.5], device=X.device), dim=-1
+            ).permute(1, 2, 0)
 
             return quantiles.view(
                 quantiles.shape[0], 1, quantiles.shape[1] * quantiles.shape[2]
             )
 
         else:
-            quantiles = X.quantile(torch.linspace(0, 1, num_quantiles), dim=-1).permute(
-                1, 2, 0
-            )
+            quantiles = X.quantile(
+                torch.linspace(0, 1, num_quantiles, device=X.device), dim=-1
+            ).permute(1, 2, 0)
             quantiles[..., 1::2] = quantiles[..., 1::2] - X.mean(-1, keepdim=True)
 
             return quantiles.view(
