@@ -571,3 +571,99 @@ def test_adaptive_shrinkage_fills_unoccupied_buckets(device):
 
     assert torch.isfinite(b).all()
     assert (b != 0).float().mean() > (a != 0).float().mean() * 1.5
+
+
+# == heterogeneous bagging =====================================================
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_bagging_without_overrides_is_unchanged(device):
+
+    X, Y, k = _data()
+
+    # one replay sequence per model, shared by its three estimators, so the two
+    # models see identical hashes and only the `overrides` path differs
+    make = _random_splitter(3 * 5, X.shape[1], device)
+
+    def build(overrides):
+        return BaggedHashBoost(
+            num_estimators=3,
+            overrides=overrides,
+            num_classes=k,
+            max_num_hashes=6,
+            device=device,
+            splitter=make(),
+        )
+
+    uniform = build(None)
+    empty = build([{}])
+
+    for _ in range(5):
+        uniform.fit_batch(X, Y)
+        empty.fit_batch(X, Y)
+
+    assert torch.allclose(uniform.predict_proba(X), empty.predict_proba(X), atol=1e-6)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_bagging_overrides_cycle_and_build_separate_partitioners(device):
+    """Two patches over four estimators is ABAB, and no partitioner is shared.
+
+    Sharing matters: a `Partitioner` *instance* owns the split tables for every
+    round, so passing one would silently give all four estimators the same
+    partitions -- an ensemble of identical members.
+    """
+
+    X, Y, k = _data()
+
+    bagged = BaggedHashBoost(
+        num_estimators=4,
+        overrides=[{"num_bits": 6}, {"num_bits": 4, "partitioner": ObliquePartitioner}],
+        num_classes=k,
+        max_num_hashes=6,
+        device=device,
+    )
+
+    for _ in range(5):
+        bagged.fit_batch(X, Y)
+
+    assert [e.num_bits for e in bagged.estimators] == [6, 4, 6, 4]
+    assert [type(e.partitioner).__name__ for e in bagged.estimators] == [
+        "AxisAlignedPartitioner",
+        "ObliquePartitioner",
+        "AxisAlignedPartitioner",
+        "ObliquePartitioner",
+    ]
+
+    identities = {id(e.partitioner) for e in bagged.estimators}
+    assert len(identities) == 4
+
+    assert torch.isfinite(bagged.predict_proba(X)).all()
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_estimator_agreement_is_a_fraction(device):
+
+    X, Y, k = _data()
+
+    bagged = BaggedHashBoost(
+        num_estimators=3, num_classes=k, max_num_hashes=6, device=device
+    )
+    lone = BaggedHashBoost(
+        num_estimators=1, num_classes=k, max_num_hashes=6, device=device
+    )
+
+    for _ in range(5):
+        bagged.fit_batch(X, Y)
+        lone.fit_batch(X, Y)
+
+    agreement = bagged.estimator_agreement(X)
+
+    assert 0.0 <= agreement <= 1.0
+    assert lone.estimator_agreement(X) == 1.0
+
+    # an ensemble of copies of one estimator agrees with itself perfectly
+    for estimator in bagged.estimators[1:]:
+        estimator.load_state_dict(bagged.estimators[0].state_dict())
+
+    assert bagged.estimator_agreement(X) == pytest.approx(1.0)

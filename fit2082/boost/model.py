@@ -1,7 +1,8 @@
 """Boosted hash ensemble, torch-native and GPU-resident."""
 
 import math
-from typing import Any
+from collections.abc import Callable
+from typing import Any, cast
 
 import numpy.typing as npt
 import torch
@@ -41,7 +42,7 @@ class HashBoost:
         hashes_per_round: int = 1,
         device: str | torch.device | None = None,
         splitter: Splitter | None = None,
-        partitioner: Partitioner | None = None,
+        partitioner: Partitioner | Callable[..., Partitioner] | None = None,
         objective: Objective | None = None,
         round_chunk: int | None = None,
         compile: bool = False,
@@ -66,13 +67,34 @@ class HashBoost:
 
         # `splitter` selects members of a family; `partitioner` defines the
         # family itself and owns the split parameters.
-        self.partitioner = partitioner or AxisAlignedPartitioner(
-            num_bits=self.num_bits,
-            max_num_hashes=self.max_num_hashes,
-            device=self.device,
-            splitter=splitter or HardPairSplitter(generator=generator),
-            compile=compile,
-        )
+        resolved: Partitioner
+
+        if partitioner is None:
+            resolved = AxisAlignedPartitioner(
+                num_bits=self.num_bits,
+                max_num_hashes=self.max_num_hashes,
+                device=self.device,
+                splitter=splitter or HardPairSplitter(generator=generator),
+                compile=compile,
+            )
+        elif callable(partitioner):
+            # A class or factory rather than an instance -- the partitioners
+            # here define no `__call__`, so the two are distinguishable. This
+            # is what lets an ensemble give each member its own partition
+            # family: passing one *instance* would share a single set of split
+            # tables between every estimator.
+            factory = cast(Callable[..., Partitioner], partitioner)
+
+            resolved = factory(
+                num_bits=self.num_bits,
+                max_num_hashes=self.max_num_hashes,
+                device=self.device,
+                compile=compile,
+            )
+        else:
+            resolved = partitioner
+
+        self.partitioner = resolved
 
         self.tables = HashTables(
             num_classes=self.num_classes,
