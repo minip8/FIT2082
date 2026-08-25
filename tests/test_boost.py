@@ -396,7 +396,7 @@ def test_bagging_averages_estimators(device):
         probabilities.sum(-1), torch.ones(X.shape[0], device=probabilities.device)
     )
 
-    expected = sum(e.predict_proba(X) for e in bagged.estimators) / 3
+    expected = torch.stack([e.predict_proba(X) for e in bagged.estimators]).mean(0)
     assert torch.allclose(probabilities, expected, atol=1e-6)
 
 
