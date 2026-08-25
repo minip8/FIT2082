@@ -31,6 +31,7 @@ class HashTables:
         device: torch.device,
         hessian_eps: float = 1e-6,
         neighbour_shrinkage: float = 0.0,
+        shrinkage_tau: float = 0.0,
         round_chunk: int | None = None,
         chunk_budget_bytes: int = 128 << 20,
     ) -> None:
@@ -43,6 +44,7 @@ class HashTables:
         self.device = device
         self.hessian_eps = hessian_eps
         self.neighbour_shrinkage = neighbour_shrinkage
+        self.shrinkage_tau = shrinkage_tau
 
         self._round_chunk = round_chunk
         self._refresh_chunk = 128
@@ -152,11 +154,25 @@ class HashTables:
         gets nothing from that round. Mixing in the neighbours, which differ by
         exactly one split and are the nearest available evidence, lets those
         buckets say something. It does not shrink leaf magnitudes.
+
+        `shrinkage_tau` > 0 selects the same mixing with a *per bucket* weight
+        instead of one global alpha:
+
+            alpha_s = tau / (tau + mass_s),   mass_s = sum_k hessian[s, k]
+
+        A bucket the data never reached has mass 0 and takes its neighbours'
+        evidence in full; a well-populated one is left almost untouched. A
+        single global alpha has to serve both, which is the likeliest reason
+        the fixed version measured as noise (it helps in two paired
+        comparisons and hurts in two) despite the mechanism demonstrably
+        working. `tau` is in units of accumulated hessian, so it reads as "the
+        bucket mass at which a bucket trusts itself and its neighbours
+        equally".
         """
 
         k = self.num_classes
 
-        if not self.neighbour_shrinkage:
+        if not (self.neighbour_shrinkage or self.shrinkage_tau):
             numerator = self.stats[:num_rounds, :, :k]
             denominator = self.stats[:num_rounds, :, k:]
 
@@ -165,8 +181,6 @@ class HashTables:
             )
 
             return
-
-        alpha = self.neighbour_shrinkage
 
         # chunked over rounds: the pooled copy is the same size as the slice
         for a in range(0, num_rounds, self._refresh_chunk):
@@ -177,6 +191,17 @@ class HashTables:
             pooled = torch.zeros_like(block)
             for j in range(self.num_bits):
                 pooled += block[:, self.neighbours[j], :]
+
+            if self.shrinkage_tau:
+                tau = self.shrinkage_tau
+
+                # (chunk, buckets, 1), broadcasting over numerator and
+                # denominator alike. An empty bucket has mass exactly 0 and so
+                # alpha exactly 1 -- no division by zero, because tau > 0 here.
+                mass = block[..., k:].sum(-1, keepdim=True)
+                alpha = tau / (tau + mass)
+            else:
+                alpha = self.neighbour_shrinkage
 
             smoothed = (1 - alpha) * block + (alpha / self.num_bits) * pooled
 

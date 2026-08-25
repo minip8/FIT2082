@@ -47,6 +47,7 @@ class HashBoost:
         compile: bool = False,
         hessian_eps: float = 1e-6,
         neighbour_shrinkage: float = 0.0,
+        shrinkage_tau: float = 0.0,
         generator: torch.Generator | None = None,
     ) -> None:
 
@@ -81,6 +82,7 @@ class HashBoost:
             device=self.device,
             hessian_eps=hessian_eps,
             neighbour_shrinkage=neighbour_shrinkage,
+            shrinkage_tau=shrinkage_tau,
             round_chunk=round_chunk,
         )
 

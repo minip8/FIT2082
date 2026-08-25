@@ -13,7 +13,12 @@ import numpy as np
 import pytest
 import torch
 
-from fit2082.boost import BaggedHashBoost, HashBoost, ObliquePartitioner
+from fit2082.boost import (
+    BaggedHashBoost,
+    HashBoost,
+    HashTables,
+    ObliquePartitioner,
+)
 from fit2082.demo.boost import NewHashBoost, _predict_multi0
 
 DEVICES = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
@@ -466,3 +471,103 @@ def test_state_dict_round_trip(device):
 
     assert restored.num_rounds == model.num_rounds
     assert torch.allclose(restored.predict(X), model.predict(X), atol=1e-6)
+
+
+# == mass-adaptive leaf smoothing ==============================================
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_zero_tau_is_unsmoothed(device):
+
+    X, Y, k = _data()
+    make = _random_splitter(10, X.shape[1], device)
+
+    plain = HashBoost(num_classes=k, max_num_hashes=11, device=device, splitter=make())
+    zero = HashBoost(
+        num_classes=k,
+        max_num_hashes=11,
+        device=device,
+        shrinkage_tau=0.0,
+        splitter=make(),
+    )
+
+    for _ in range(10):
+        plain.fit_batch(X, Y)
+        zero.fit_batch(X, Y)
+
+    assert torch.allclose(plain.tables.logits, zero.tables.logits, atol=1e-6)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_adaptive_shrinkage_scales_with_bucket_mass(device):
+    """The whole point: borrowing is inverse to the evidence a bucket already has.
+
+    Two buckets with the same leaf value, one holding mass 200 and one holding
+    mass 0.02, each with a neighbour pulling towards the other class. Under a
+    fixed alpha both move by the same fraction, which is the likeliest reason
+    the fixed version measures as noise -- it pays for the sparse buckets by
+    damaging the dense ones. Under `shrinkage_tau` only the sparse one moves.
+    """
+
+    def build(tau):
+
+        tables = HashTables(
+            num_classes=2,
+            num_bits=3,
+            max_num_hashes=1,
+            lr=1.0,
+            device=torch.device(device),
+            shrinkage_tau=tau,
+        )
+
+        def put(bucket, values):
+            tables.stats[0, bucket] = torch.tensor(
+                values, dtype=torch.float32, device=tables.stats.device
+            )
+
+        # [numerator (2 classes), denominator (2 classes)]
+        put(0, [100.0, 0.0, 100.0, 100.0])  # heavy, class 0
+        put(1, [0.01, 0.0, 0.01, 0.01])  # light, class 0, same leaf value
+        put(2, [0.0, 60.0, 60.0, 60.0])  # neighbour of 0 (0^2), class 1
+        put(3, [0.0, 60.0, 60.0, 60.0])  # neighbour of 1 (1^2), class 1
+
+        tables.refresh_logits(1)
+
+        return tables.logits[0].clone()
+
+    plain = build(0.0)
+    adaptive = build(10.0)
+
+    # both buckets start at the same leaf value, so the shifts are comparable
+    assert torch.allclose(plain[0], plain[1], atol=1e-4)
+
+    heavy = (adaptive[0] - plain[0]).abs().max()
+    light = (adaptive[1] - plain[1]).abs().max()
+
+    assert light > heavy * 10
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_adaptive_shrinkage_fills_unoccupied_buckets(device):
+
+    X, Y, k = _data()
+    make = _random_splitter(10, X.shape[1], device)
+
+    plain = HashBoost(num_classes=k, max_num_hashes=11, device=device, splitter=make())
+    smoothed = HashBoost(
+        num_classes=k,
+        max_num_hashes=11,
+        device=device,
+        shrinkage_tau=10.0,
+        splitter=make(),
+    )
+
+    for _ in range(10):
+        plain.fit_batch(X, Y)
+        smoothed.fit_batch(X, Y)
+
+    a = plain.tables.logits[: plain.num_rounds]
+    b = smoothed.tables.logits[: smoothed.num_rounds]
+
+    assert torch.isfinite(b).all()
+    assert (b != 0).float().mean() > (a != 0).float().mean() * 1.5
