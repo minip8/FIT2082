@@ -22,7 +22,8 @@ from typing import Any
 import numpy as np
 import torch
 
-from fit2082.boost import BaggedHashBoost, HashBoost
+from fit2082.boost import BaggedHashBoost, HashBoost, ObliquePartitioner
+from fit2082.boost.readout import fit_readout
 from fit2082.demo.utils import Dataset
 from fit2082.quant.quant import Quant
 
@@ -31,12 +32,21 @@ from fit2082.quant.quant import Quant
 
 @dataclass
 class Split:
-    """Cached, device-resident features for one train/validation split."""
+    """Cached, device-resident features for one train/validation split.
+
+    `X_tune`/`Y_tune` is a second held-out slice, for choosing anything that
+    has to be chosen after training -- the readout's early stopping and `lam`.
+    It exists so that none of those decisions touch `X_va`, which is the number
+    every result in the README is quoted against; selecting on `X_va` would
+    quietly invalidate the lot.
+    """
 
     batches: list[tuple[torch.Tensor, torch.Tensor]]
     X_va: torch.Tensor
     Y_va: torch.Tensor
     num_classes: int
+    X_tune: torch.Tensor | None = None
+    Y_tune: torch.Tensor | None = None
     meta: dict[str, Any] = field(default_factory=dict)
 
 
@@ -45,6 +55,7 @@ def load_split(
     dataset: str = "Pedestrian",
     num_train: int = 32768 * 2,
     num_valid: int = 4096,
+    num_tune: int = 4096,
     batch_size: int = 4096,
     seed: int = 123,
     transform: str = "quant",
@@ -54,6 +65,12 @@ def load_split(
 
     The QUANT transform dominates setup, so it is applied once here and the
     features are reused by every variant in the sweep.
+
+    The tune slice is taken from *after* the validation slice rather than out
+    of the training indices, so that adding it leaves both the training set and
+    the validation set byte-identical to every earlier sweep. Pedestrian has
+    151,696 rows outside fold 0 against the 69,632 used here, so there is ample
+    unseen data to take it from.
     """
 
     data = Dataset(
@@ -81,33 +98,48 @@ def load_split(
     training = to_device(data[indices[:num_train]])
     validation = to_device(data[indices[num_train : num_train + num_valid]])
 
+    start = num_train + num_valid
+    tuning = to_device(data[indices[start : start + num_tune]]) if num_tune else []
+
     data.close()
 
     if transform == "quant":
         quant = Quant()
         quant.fit_transform(training[0][0])
 
+        def features(subset):
+            return torch.cat([quant.transform(X) for X, _ in subset])
+
         batches = [(quant.transform(X), Y) for X, Y in training]
-        X_va = torch.cat([quant.transform(X) for X, _ in validation])
     elif transform == "none":
+
+        def features(subset):
+            return torch.cat([X.reshape(X.shape[0], -1) for X, _ in subset])
+
         batches = [(X.reshape(X.shape[0], -1), Y) for X, Y in training]
-        X_va = torch.cat([X.reshape(X.shape[0], -1) for X, _ in validation])
     else:
         raise ValueError(f"unknown transform {transform!r}")
 
+    X_va = features(validation)
     Y_va = torch.cat([Y for _, Y in validation])
+
+    X_tune = features(tuning) if tuning else None
+    Y_tune = torch.cat([Y for _, Y in tuning]) if tuning else None
 
     return Split(
         batches=batches,
         X_va=X_va,
         Y_va=Y_va,
         num_classes=num_classes,
+        X_tune=X_tune,
+        Y_tune=Y_tune,
         meta={
             "dataset": dataset,
             "fold": 0,
             "seed": seed,
             "n_tr": num_train,
             "n_va": num_valid,
+            "n_tune": num_tune,
             "batch_size": batch_size,
             "num_classes": num_classes,
             "transform": transform,
@@ -118,7 +150,9 @@ def load_split(
 
 # == variants ==================================================================
 
-# Each entry is kwargs for HashBoost, plus optional "estimators" to bag.
+# Each entry is kwargs for HashBoost, plus three keys the runner consumes
+# itself: "estimators" (how many to bag), "overrides" (per-estimator kwarg
+# patches) and "readout" (kwargs for a post-fit `fit_readout`).
 # Notes record what screening already measured, so results stay comparable.
 VARIANTS: dict[str, dict[str, Any]] = {
     "baseline": {},
@@ -146,6 +180,127 @@ VARIANTS: dict[str, dict[str, Any]] = {
     "leaf_l2_10": {"hessian_eps": 10.0},
     "bits_6": {"num_bits": 6},
     "lr_0.05": {"lr": 0.05},
+    # -- heterogeneous bagging ------------------------------------------------
+    # Members built from identical kwargs decorrelate through splitter noise
+    # alone. The variance of an average falls with the correlation between its
+    # members, so making them differ in *what they are* attacks the term that
+    # bagging actually trades on. The ingredients are the ones already measured
+    # as individually break-even (`bits_6`, `lr_0.05`): near-neutral quality is
+    # what makes a good member, since the mixture should keep the mean and cut
+    # the correlation. Watch the reported agreement, not just the error.
+    "bagged_4_mixed_bits": {
+        "estimators": 4,
+        "overrides": [
+            {"num_bits": 6},
+            {"num_bits": 7},
+            {"num_bits": 8},
+            {"num_bits": 9},
+        ],
+    },
+    "bagged_4_mixed_family": {
+        "estimators": 4,
+        "overrides": [{}, {"partitioner": ObliquePartitioner}],
+    },
+    "bagged_4_mixed_all": {
+        "estimators": 4,
+        "overrides": [
+            {"num_bits": 7},
+            {"partitioner": ObliquePartitioner},
+            {"lr": 0.05},
+            {"num_bits": 9, "partitioner": ObliquePartitioner},
+        ],
+    },
+    "bagged_4_mixed_all_capacity_2": {
+        "estimators": 4,
+        "hashes_per_round": 2,
+        "overrides": [
+            {"num_bits": 7},
+            {"partitioner": ObliquePartitioner},
+            {"lr": 0.05},
+            {"num_bits": 9, "partitioner": ObliquePartitioner},
+        ],
+    },
+    # implemented and unit-tested since c1b64fe, never once measured
+    "oblique": {"partitioner": ObliquePartitioner},
+    # -- mass-adaptive neighbour shrinkage ------------------------------------
+    # Fixed `neighbour_shrinkage` helps in two paired comparisons and hurts in
+    # two, despite the mechanism working (non-zero leaves 31% -> 78%). That
+    # signature says one global alpha is helping sparse buckets and damaging
+    # dense ones; tau makes the borrowing proportional to how little evidence a
+    # bucket has of its own.
+    "adaptive_smooth_1": {"shrinkage_tau": 1.0},
+    "adaptive_smooth_10": {"shrinkage_tau": 10.0},
+    "adaptive_smooth_100": {"shrinkage_tau": 100.0},
+    # the single-model sweep is monotone out to tau=100 without turning over,
+    # so the optimum is past it; as tau -> inf every bucket is replaced by its
+    # neighbour mean, which must eventually break
+    "adaptive_smooth_300": {"shrinkage_tau": 300.0},
+    "adaptive_smooth_1000": {"shrinkage_tau": 1000.0},
+    "adaptive_smooth_3000": {"shrinkage_tau": 3000.0},
+    # still descending at 3000. Typical bucket mass here is ~1e4 (65k rows x 50
+    # epochs / 256 buckets), so these are the values at which dense buckets --
+    # not just empty ones -- start borrowing, and where it must eventually break.
+    "adaptive_smooth_10000": {"shrinkage_tau": 10000.0},
+    "adaptive_smooth_30000": {"shrinkage_tau": 30000.0},
+    "adaptive_smooth_100000": {"shrinkage_tau": 100000.0},
+    "adaptive_smooth_1000000": {"shrinkage_tau": 1000000.0},
+    "adaptive_smooth_10_bagged_4_capacity_2": {
+        "shrinkage_tau": 10.0,
+        "estimators": 4,
+        "hashes_per_round": 2,
+    },
+    # tau=10 *hurt* the bagged+capacity model where it helped the plain one;
+    # these check that against the tau that was actually best single-model,
+    # and separate "bagging absorbs it" from "capacity absorbs it"
+    "adaptive_smooth_100_bagged_4": {"shrinkage_tau": 100.0, "estimators": 4},
+    "adaptive_smooth_100_capacity_2": {"shrinkage_tau": 100.0, "hashes_per_round": 2},
+    "adaptive_smooth_100_bagged_4_capacity_2": {
+        "shrinkage_tau": 100.0,
+        "estimators": 4,
+        "hashes_per_round": 2,
+    },
+    # tau=3000 was far better than tau=100 on the plain model, and smoothing
+    # combined with capacity looked strong at the wrong tau -- so these are the
+    # combinations at the tau the single-model sweep actually chose
+    "adaptive_smooth_3000_capacity_2": {
+        "shrinkage_tau": 3000.0,
+        "hashes_per_round": 2,
+    },
+    "adaptive_smooth_3000_bagged_4": {"shrinkage_tau": 3000.0, "estimators": 4},
+    "adaptive_smooth_3000_bagged_4_capacity_2": {
+        "shrinkage_tau": 3000.0,
+        "estimators": 4,
+        "hashes_per_round": 2,
+    },
+    # -- refit readout --------------------------------------------------------
+    # The leaf tables refit jointly against cross entropy rather than round by
+    # round. The ladder runs cheapest first: if "round" (one gain per round)
+    # buys nothing, the premise that the additive Newton readout is suboptimal
+    # is wrong and the larger rungs are not worth running.
+    "readout_round": {"readout": {"rung": "round"}},
+    "readout_round_class": {"readout": {"rung": "round_class"}},
+    "readout_table": {"readout": {"rung": "table", "lam": 0.1, "lr": 0.01}},
+    "readout_round_bagged_4_capacity_2": {
+        "estimators": 4,
+        "hashes_per_round": 2,
+        "readout": {"rung": "round"},
+    },
+    # Paired, "round" is worth exactly +0.0000 while "table" is worth +0.0078:
+    # the Newton leaves are wrong *within* a round, not mis-weighted between
+    # rounds. So the combination worth testing on the best ensemble is a table
+    # refit, not the round rescaling measured above. "round_class" carries most
+    # of the gain for 1/256th of the parameters, which matters here -- a table
+    # over 6400 rounds is 537 MB before Adam's two moments.
+    "readout_round_class_bagged_4_capacity_2": {
+        "estimators": 4,
+        "hashes_per_round": 2,
+        "readout": {"rung": "round_class"},
+    },
+    "readout_table_bagged_4_capacity_2": {
+        "estimators": 4,
+        "hashes_per_round": 2,
+        "readout": {"rung": "table", "lam": 0.1, "lr": 0.01},
+    },
 }
 
 
@@ -169,6 +324,8 @@ def run_once(
 
     config = dict(config)
     estimators = config.pop("estimators", None)
+    overrides = config.pop("overrides", None)
+    readout = config.pop("readout", None)
 
     per_batch = config.get("hashes_per_round", 1)
 
@@ -182,7 +339,7 @@ def run_once(
     torch.manual_seed(seed)
 
     model = (
-        BaggedHashBoost(num_estimators=estimators, **kwargs)
+        BaggedHashBoost(num_estimators=estimators, overrides=overrides, **kwargs)
         if estimators
         else HashBoost(**kwargs)
     )
@@ -204,6 +361,36 @@ def run_once(
             curve_x.append(model.num_rounds)
             curve_y.append(evaluate(model, split.X_va, split.Y_va))
 
+    boosted_final = curve_y[-1]
+    readout_info = None
+
+    if readout is not None:
+        # The readout is fit on the training data it was boosted on, early
+        # stopped on the tune slice, and only then scored on X_va -- which is
+        # never used to choose anything.
+        fitted, readout_info = fit_readout(
+            model,
+            torch.cat([X for X, _ in split.batches]),
+            torch.cat([Y for _, Y in split.batches]),
+            split.X_tune,
+            split.Y_tune,
+            **readout,
+        )
+
+        curve_x.append(model.num_rounds)
+        curve_y.append(evaluate(fitted, split.X_va, split.Y_va))
+
+        del fitted
+
+    # how often two members pick the same class: the mechanism heterogeneous
+    # bagging is supposed to move, which the +-0.003 noise floor makes hard to
+    # read from the error alone
+    agreement = (
+        model.estimator_agreement(split.X_va)
+        if isinstance(model, BaggedHashBoost)
+        else None
+    )
+
     if device.startswith("cuda"):
         torch.cuda.synchronize()
 
@@ -211,6 +398,9 @@ def run_once(
         "seed": seed,
         "final": curve_y[-1],
         "best": min(curve_y),
+        "boosted_final": boosted_final,
+        "agreement": agreement,
+        "readout": readout_info,
         "rounds": model.num_rounds,
         "wall_s": time.perf_counter() - wall,
         "cpu_s": time.process_time() - cpu,
@@ -245,6 +435,7 @@ def run_variant(
     ]
 
     finals = [r["final"] for r in runs]
+    agreements = [r["agreement"] for r in runs if r["agreement"] is not None]
 
     return {
         "params": config,
@@ -255,6 +446,8 @@ def run_variant(
             "mean": statistics.mean(finals),
             "sd": statistics.stdev(finals) if len(finals) > 1 else 0.0,
             "best": min(finals),
+            "boosted_mean": statistics.mean(r["boosted_final"] for r in runs),
+            "agreement": statistics.mean(agreements) if agreements else None,
             "rounds": runs[0]["rounds"],
             "wall_s": statistics.mean(r["wall_s"] for r in runs),
             "peak_mb": max(r["peak_mb"] for r in runs),
@@ -319,10 +512,41 @@ def main() -> None:
         f"{args.seeds} seeds x {args.epochs} epochs\n"
     )
     print(
-        f"{'variant':24s} {'val err (mean+-sd)':>22s} {'rounds':>7s} {'wall':>8s} {'peak':>8s}"
+        f"{'variant':30s} {'val err (mean+-sd)':>22s} {'agree':>7s} "
+        f"{'rounds':>7s} {'wall':>8s} {'peak':>8s}"
     )
 
+    out = Path(args.out) / f"{args.dataset}-sweep-{commit_hash()}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+
     models: dict[str, Any] = {}
+
+    def write() -> None:
+        """Serialise what has finished so far.
+
+        Called after every variant, not once at the end: a sweep is tens of
+        minutes of GPU time and the expensive variants run last, so a crash
+        there (an OOM on a wide ensemble, say) would otherwise discard every
+        result before it.
+        """
+
+        out.write_text(
+            json.dumps(
+                {
+                    "commit": commit_hash(),
+                    "dataset": args.dataset,
+                    "device": args.device,
+                    "split": split.meta,
+                    "epochs": args.epochs,
+                    "seeds": args.seeds,
+                    "models": models,
+                },
+                indent=2,
+                # variant params may hold a partitioner class, which has no
+                # JSON form; its repr is what a reader of the file wants anyway
+                default=str,
+            )
+        )
 
     for name in names:
         entry = run_variant(
@@ -335,30 +559,16 @@ def main() -> None:
             args.device,
         )
         models[name] = entry
+        write()
 
         s = entry["summary"]
+        agreement = f"{s['agreement']:7.3f}" if s["agreement"] is not None else " " * 7
         print(
-            f"{name:24s} {s['mean']:12.4f} +- {s['sd']:.4f} {s['rounds']:7d} "
-            f"{s['wall_s']:7.1f}s {s['peak_mb']:7.0f}M",
+            f"{name:30s} {s['mean']:12.4f} +- {s['sd']:.4f} {agreement} "
+            f"{s['rounds']:7d} {s['wall_s']:7.1f}s {s['peak_mb']:7.0f}M",
             flush=True,
         )
 
-    out = Path(args.out) / f"{args.dataset}-sweep-{commit_hash()}.json"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(
-        json.dumps(
-            {
-                "commit": commit_hash(),
-                "dataset": args.dataset,
-                "device": args.device,
-                "split": split.meta,
-                "epochs": args.epochs,
-                "seeds": args.seeds,
-                "models": models,
-            },
-            indent=2,
-        )
-    )
     print(f"\nwrote {out}")
 
 
