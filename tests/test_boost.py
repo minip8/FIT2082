@@ -18,7 +18,10 @@ from fit2082.boost import (
     HashBoost,
     HashTables,
     ObliquePartitioner,
+    Readout,
+    fit_readout,
 )
+from fit2082.boost.readout import RUNGS
 from fit2082.demo.boost import NewHashBoost, _predict_multi0
 
 DEVICES = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
@@ -667,3 +670,102 @@ def test_estimator_agreement_is_a_fraction(device):
         estimator.load_state_dict(bagged.estimators[0].state_dict())
 
     assert bagged.estimator_agreement(X) == pytest.approx(1.0)
+
+
+# == refit readout =============================================================
+
+
+def _readout_data(device, rounds=8, num_bits=4, n=2048, k=8):
+
+    X, Y, _ = _data(n=n, p=16, k=k, seed=3)
+
+    model = HashBoost(
+        num_classes=k,
+        num_bits=num_bits,
+        max_num_hashes=rounds + 1,
+        device=device,
+    )
+
+    for _ in range(rounds):
+        model.fit_batch(X, Y)
+
+    return model, X, Y
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("rung", RUNGS)
+def test_readout_warm_start_reproduces_the_model(device, rung):
+    """Step zero must be the source model, or the fit is not a refit of it.
+
+    This is what makes the comparison meaningful: any difference the readout
+    shows is the joint fit, not a different parameterisation of the same table.
+    """
+
+    model, X, Y = _readout_data(device)
+
+    readout, _ = fit_readout(model, X, Y, X, Y, rung=rung, steps=0)
+
+    assert torch.allclose(readout.predict(X), model.predict(X), atol=1e-5)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_readout_forward_matches_predict_from_codes(device):
+    """The readout's `embedding_bag` and the model's must agree on one table."""
+
+    model, X, _ = _readout_data(device)
+
+    readout = Readout(
+        [model], model.tables.logits[: model.num_rounds].clone(), rung="table"
+    )
+
+    assert torch.allclose(readout.predict(X), model.predict(X), atol=1e-5)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("rung", RUNGS)
+def test_readout_lowers_training_loss(device, rung):
+    """Warm-started and fit against the same objective, it can only improve."""
+
+    model, X, Y = _readout_data(device)
+
+    readout, _ = fit_readout(
+        model, X, Y, rung=rung, steps=60, lr=0.05, lam=0.0, batch_size=512
+    )
+
+    Yd = torch.as_tensor(Y.astype(np.int64), device=readout.device)
+
+    before = torch.nn.functional.cross_entropy(model.predict(X), Yd)
+    after = torch.nn.functional.cross_entropy(readout.predict(X), Yd)
+
+    assert after < before
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_readout_spans_a_heterogeneous_ensemble(device):
+    """Members with different bit widths stack into one padded table."""
+
+    X, Y, k = _data(n=1024, k=6, seed=4)
+
+    bagged = BaggedHashBoost(
+        num_estimators=3,
+        overrides=[
+            {"num_bits": 4},
+            {"num_bits": 6},
+            {"partitioner": ObliquePartitioner},
+        ],
+        num_classes=k,
+        num_bits=5,
+        max_num_hashes=7,
+        device=device,
+    )
+
+    for _ in range(6):
+        bagged.fit_batch(X, Y)
+
+    readout, info = fit_readout(bagged, X, Y, X, Y, rung="round", steps=20, lr=0.1)
+
+    # every estimator's rounds, and the widest estimator's bucket count
+    assert info["rounds"] == 3 * bagged.num_rounds
+    assert readout.weights.shape[1] == 2**6
+
+    assert torch.isfinite(readout.predict(X)).all()
