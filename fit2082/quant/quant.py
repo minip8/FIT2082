@@ -21,6 +21,10 @@ from tqdm import tqdm
 
 Batch = tuple[npt.NDArray[Any], npt.NDArray[Any]]
 
+# Labels: accepted but unused. The transform is unsupervised, so `Y` is
+# threaded through fit/fit_transform for API symmetry and then dropped.
+Labels = torch.Tensor | npt.NDArray[Any]
+
 
 class TrainingData(Protocol):
     """Batched dataset as consumed by QuantClassifier.fit."""
@@ -74,16 +78,18 @@ def f_quantile(X: torch.Tensor, div: int = 4) -> torch.Tensor:
         num_quantiles = 1 + (n - 1) // div
 
         if num_quantiles == 1:
-            quantiles = X.quantile(torch.tensor([0.5]), dim=-1).permute(1, 2, 0)
+            quantiles = X.quantile(
+                torch.tensor([0.5], device=X.device), dim=-1
+            ).permute(1, 2, 0)
 
             return quantiles.view(
                 quantiles.shape[0], 1, quantiles.shape[1] * quantiles.shape[2]
             )
 
         else:
-            quantiles = X.quantile(torch.linspace(0, 1, num_quantiles), dim=-1).permute(
-                1, 2, 0
-            )
+            quantiles = X.quantile(
+                torch.linspace(0, 1, num_quantiles, device=X.device), dim=-1
+            ).permute(1, 2, 0)
             quantiles[..., 1::2] = quantiles[..., 1::2] - X.mean(-1, keepdim=True)
 
             return quantiles.view(
@@ -107,7 +113,7 @@ class IntervalModel:
             depth=depth,
         )
 
-    def fit(self, X: torch.Tensor, Y: npt.NDArray[Any]) -> None:
+    def fit(self, X: torch.Tensor, Y: Labels | None = None) -> None:
 
         pass
 
@@ -120,7 +126,7 @@ class IntervalModel:
 
         return torch.cat(features, -1)
 
-    def fit_transform(self, X: torch.Tensor, Y: npt.NDArray[Any]) -> torch.Tensor:
+    def fit_transform(self, X: torch.Tensor, Y: Labels | None = None) -> torch.Tensor:
 
         self.fit(X, Y)
 
@@ -165,7 +171,7 @@ class Quant:
 
         return torch.cat(features, -1)
 
-    def fit_transform(self, X: torch.Tensor, Y: npt.NDArray[Any]) -> torch.Tensor:
+    def fit_transform(self, X: torch.Tensor, Y: Labels | None = None) -> torch.Tensor:
 
         features = []
 
