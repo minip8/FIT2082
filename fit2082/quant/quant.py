@@ -21,6 +21,10 @@ from tqdm import tqdm
 
 Batch = tuple[npt.NDArray[Any], npt.NDArray[Any]]
 
+# Labels: accepted but unused. The transform is unsupervised, so `Y` is
+# threaded through fit/fit_transform for API symmetry and then dropped.
+Labels = torch.Tensor | npt.NDArray[Any]
+
 
 class TrainingData(Protocol):
     """Batched dataset as consumed by QuantClassifier.fit."""
@@ -109,7 +113,7 @@ class IntervalModel:
             depth=depth,
         )
 
-    def fit(self, X: torch.Tensor, Y: npt.NDArray[Any] | None = None) -> None:
+    def fit(self, X: torch.Tensor, Y: Labels | None = None) -> None:
 
         pass
 
@@ -122,9 +126,7 @@ class IntervalModel:
 
         return torch.cat(features, -1)
 
-    def fit_transform(
-        self, X: torch.Tensor, Y: npt.NDArray[Any] | None = None
-    ) -> torch.Tensor:
+    def fit_transform(self, X: torch.Tensor, Y: Labels | None = None) -> torch.Tensor:
 
         self.fit(X, Y)
 
@@ -169,9 +171,7 @@ class Quant:
 
         return torch.cat(features, -1)
 
-    def fit_transform(
-        self, X: torch.Tensor, Y: npt.NDArray[Any] | None = None
-    ) -> torch.Tensor:
+    def fit_transform(self, X: torch.Tensor, Y: Labels | None = None) -> torch.Tensor:
 
         features = []
 
