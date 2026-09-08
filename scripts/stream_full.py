@@ -242,6 +242,7 @@ def run_hashboost(
             },
             "rounds": rounds,
             "stream_s": stream_s,
+            "n_tr": int(stream.indices.shape[0]),
             "results": {
                 name: {"merror": curve([e for _, e in rec], [r for r, _ in rec])}
                 for name, rec in records.items()
@@ -469,6 +470,7 @@ def run_xgboost(
                 "batch_size": stream.batch_size,
                 "resident": "paged from disk",
             },
+            "n_tr": int(stream.indices.shape[0]),
             "seconds_per_round": float(np.mean(probe.round_s))
             if probe.round_s
             else 0.0,
@@ -542,6 +544,12 @@ def main() -> None:
     parser.add_argument("--out", default="results")
     parser.add_argument(
         "--model", default="hashboost", choices=("hashboost", "xgboost")
+    )
+    parser.add_argument(
+        "--label",
+        default=None,
+        help="key to store this run under (default: the model name). Lets a "
+        "control on a smaller pool sit beside the full run in one file.",
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
@@ -661,8 +669,10 @@ def main() -> None:
         },
     }
 
+    label = args.label or args.model
+
     def checkpoint(entry: dict[str, Any]) -> None:
-        write_results(out, {args.model: entry}, info)
+        write_results(out, {label: entry}, info)
 
     runner = run_hashboost if args.model == "hashboost" else run_xgboost
     checkpoint(runner(stream, quant, holdouts, num_classes, args, device, checkpoint))
