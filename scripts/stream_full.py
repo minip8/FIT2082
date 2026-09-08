@@ -105,6 +105,7 @@ class RawStream:
         seed: int = 0,
         shuffle: bool = True,
         drop_cache_every: int = 50,
+        random_access: bool = False,
     ) -> None:
 
         self._X = np.load(path_X, mmap_mode="r")
@@ -112,6 +113,19 @@ class RawStream:
 
         # numpy closes the file it mmapped, so keep an fd of our own to advise on
         self._fd = os.open(path_X, os.O_RDONLY)
+
+        # Readahead reads far more than these scattered rows need -- 38x on a
+        # sorted 4,096-row batch -- but leave it on anyway: sorting the batch
+        # makes the pattern semi-sequential, and the kernel's bulk fetches are
+        # 20x *faster* than the page-at-a-time faulting MADV_RANDOM gives
+        # (78 ms/batch against 1571 ms). The read amplification is paid for by
+        # dropping the cache periodically, not by defeating readahead.
+        #
+        # MADV_RANDOM is offered for the memory-starved case. Note the advice
+        # has to go on the *mapping*: these reads are page faults through the
+        # memmap, and posix_fadvise on the fd measured byte-for-byte identical.
+        if random_access:
+            self._X._mmap.madvise(mmap.MADV_RANDOM)
 
         self.indices = indices
         self.batch_size = batch_size
@@ -672,6 +686,11 @@ def main() -> None:
     parser.add_argument("--early-stopping-rounds", type=int, default=50)
     parser.add_argument("--cache-dir", default="/tmp/xgb-extmem")
     parser.add_argument(
+        "--random-access",
+        action="store_true",
+        help="MADV_RANDOM on the input: 24x fewer bytes read, 20x slower",
+    )
+    parser.add_argument(
         "--cache-host-ratio",
         type=float,
         default=0.0,
@@ -707,6 +726,7 @@ def main() -> None:
         args.batch_size,
         seed=args.seed,
         drop_cache_every=args.drop_cache_every,
+        random_access=args.random_access,
     )
 
     # a previous run leaves the 8 GB .npy sitting in the page cache -- 5 GB of
