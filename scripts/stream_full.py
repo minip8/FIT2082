@@ -218,7 +218,8 @@ def run_hashboost(
 
     records: dict[str, list[tuple[int, float]]] = {"tr": [], "va": []}
     peak_mb = gpu_used_mb(device)
-    stream_s = 0.0
+    read_s = 0.0
+    transform_s = 0.0
     rounds = 0
 
     def evaluate() -> None:
@@ -241,7 +242,8 @@ def run_hashboost(
                 "resident": "one batch",
             },
             "rounds": rounds,
-            "stream_s": stream_s,
+            "read_s": read_s,
+            "transform_s": transform_s,
             "n_tr": int(stream.indices.shape[0]),
             "results": {
                 name: {"merror": curve([e for _, e in rec], [r for r, _ in rec])}
@@ -252,11 +254,26 @@ def run_hashboost(
     wall, cpu = time.perf_counter(), time.process_time()
 
     for _ in range(args.epochs):
-        for raw, y in stream:
-            read = time.perf_counter()
+        # `for raw, y in stream` would fold the memmap read into the loop
+        # machinery, where it cannot be timed -- and the read is the part that
+        # dropping the page cache makes expensive, so it is the part worth
+        # measuring. Pull each batch explicitly instead.
+        batches = iter(stream)
+
+        while True:
+            mark = time.perf_counter()
+            batch = next(batches, None)
+            read_s += time.perf_counter() - mark
+
+            if batch is None:
+                break
+
+            raw, y = batch
+
+            mark = time.perf_counter()
             Z = features(raw, quant, device)
             Y = torch.as_tensor(y.astype(np.int64), device=device)
-            stream_s += time.perf_counter() - read
+            transform_s += time.perf_counter() - mark
 
             model.fit_batch(Z, Y)
             rounds += 1
@@ -297,7 +314,8 @@ def run_hashboost(
 
     print(
         f"  {rounds} rounds in {elapsed['wall_s']:.0f}s "
-        f"({stream_s:.0f}s of it streaming)  va_final={va[-1]:.4f} va_best={min(va):.4f}",
+        f"({read_s:.0f}s reading, {transform_s:.0f}s transforming)  "
+        f"va_final={va[-1]:.4f} va_best={min(va):.4f}",
         flush=True,
     )
 
