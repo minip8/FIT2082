@@ -160,6 +160,31 @@ class RawStream:
         return np.array(self._X[order], dtype=np.float32), np.array(self._Y[order])
 
 
+def drop_page_cache(directory: Path) -> None:
+    """Flush and evict a directory's files from the page cache.
+
+    XGBoost writes ~15 GB of ellpack pages into its cache directory, and those
+    writes land in the page cache as *dirty* pages. POSIX_FADV_DONTNEED cannot
+    evict a dirty page -- it has to be written back first -- so the cache grows
+    until the machine has nothing free and the run is killed, which is exactly
+    what happened at 4.8 GB of ellpack. Sync, then advise.
+    """
+
+    for path in sorted(directory.glob("*")):
+        try:
+            fd = os.open(path, os.O_RDONLY)
+        except OSError:
+            continue
+
+        try:
+            os.fsync(fd)
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+
+
 def fit_quant(stream: RawStream, device: str) -> tuple[Quant, int]:
     """QUANT carries no data-dependent state, so one row fixes the transform."""
 
@@ -334,12 +359,20 @@ class StreamedQuant(xgb.DataIter):
     """
 
     def __init__(
-        self, stream: RawStream, quant: Quant, device: str, cache_prefix: str
+        self,
+        stream: RawStream,
+        quant: Quant,
+        device: str,
+        cache_prefix: str,
+        drop_cache_every: int = 20,
     ) -> None:
 
         self._stream = stream
         self._quant = quant
         self._device = device
+        self._cache_dir = Path(cache_prefix).parent
+        self._drop_cache_every = drop_cache_every
+        self._batches_seen = 0
         self._it: Iterator[tuple[np.ndarray, np.ndarray]] | None = None
         self.passes = 0
 
@@ -367,6 +400,11 @@ class StreamedQuant(xgb.DataIter):
 
         del Z
 
+        self._batches_seen += 1
+
+        if self._drop_cache_every and self._batches_seen % self._drop_cache_every == 0:
+            drop_page_cache(self._cache_dir)
+
         return True
 
 
@@ -374,10 +412,14 @@ class MemoryProbe(xgb.callback.TrainingCallback):
     """Samples device usage and per-round wall time once a round."""
 
     def __init__(
-        self, device: str, on_round: Callable[[Any], None] | None = None
+        self,
+        device: str,
+        on_round: Callable[[Any], None] | None = None,
+        cache_dir: Path | None = None,
     ) -> None:
 
         self.device = device
+        self._cache_dir = cache_dir
         self.peak_mb = gpu_used_mb(device)
         self.round_s: list[float] = []
         self._last = time.perf_counter()
@@ -393,6 +435,9 @@ class MemoryProbe(xgb.callback.TrainingCallback):
 
         # each round pages the whole ellpack off disk, so rounds are minutes
         # apart -- write the curve out as it goes rather than only at the end
+        if self._cache_dir is not None:
+            drop_page_cache(self._cache_dir)
+
         if self._on_round is not None:
             self._on_round(evals_log)
 
@@ -441,8 +486,16 @@ def run_xgboost(
     baseline_mb = gpu_used_mb(device)
     build_wall, build_cpu = time.perf_counter(), time.process_time()
 
-    it = StreamedQuant(stream, quant, device, str(cache / "lendb"))
-    dtrain = xgb.ExtMemQuantileDMatrix(it, max_bin=args.max_bin)
+    it = StreamedQuant(
+        stream,
+        quant,
+        device,
+        str(cache / "lendb"),
+        drop_cache_every=args.drop_cache_every,
+    )
+    dtrain = xgb.ExtMemQuantileDMatrix(
+        it, max_bin=args.max_bin, cache_host_ratio=args.cache_host_ratio
+    )
 
     # the held-out slices are small enough to bin in one go; ref=dtrain reuses
     # the training cuts so they do not sketch their own
@@ -503,6 +556,7 @@ def run_xgboost(
 
     probe = MemoryProbe(
         device,
+        cache_dir=cache,
         on_round=lambda log: checkpoint(
             entry(
                 log,
@@ -601,6 +655,12 @@ def main() -> None:
     parser.add_argument("--num-boost-round", type=int, default=1000)
     parser.add_argument("--early-stopping-rounds", type=int, default=50)
     parser.add_argument("--cache-dir", default="/tmp/xgb-extmem")
+    parser.add_argument(
+        "--cache-host-ratio",
+        type=float,
+        default=0.0,
+        help="fraction of the external-memory cache xgboost may hold in host RAM",
+    )
     parser.add_argument(
         "--no-cuda-async-pool",
         dest="cuda_async_pool",
