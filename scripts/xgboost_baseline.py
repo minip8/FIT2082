@@ -22,8 +22,6 @@ run already in `results/`.
 import argparse
 import gc
 import json
-import resource
-import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -34,6 +32,14 @@ import xgboost as xgb
 
 from fit2082.demo.utils import Dataset
 from fit2082.quant.quant import Quant
+from fit2082.results import (
+    commit_hash,
+    curve,
+    gpu_total_mb,
+    gpu_used_mb,
+    host_peak_rss_mb,
+    write_results,
+)
 
 # == data ======================================================================
 
@@ -131,22 +137,6 @@ class QuantBatches(xgb.DataIter):
 # == memory ====================================================================
 
 
-def gpu_used_mb(device: str) -> float:
-    """Whole-process device usage, not just torch's.
-
-    XGBoost allocates through its own CUDA allocator, so `max_memory_allocated`
-    cannot see the ellpack or the histograms -- the number that matters here.
-    `mem_get_info` reads the driver, which sees both.
-    """
-
-    if not device.startswith("cuda"):
-        return 0.0
-
-    free, total = torch.cuda.mem_get_info()
-
-    return (total - free) / 1e6
-
-
 class MemoryProbe(xgb.callback.TrainingCallback):
     """Samples device usage once a round, to record the training peak."""
 
@@ -160,51 +150,6 @@ class MemoryProbe(xgb.callback.TrainingCallback):
         self.peak_mb = max(self.peak_mb, gpu_used_mb(self.device))
 
         return False
-
-
-def host_peak_mb() -> float:
-
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
-
-
-# == results ===================================================================
-
-
-def commit_hash() -> str:
-
-    try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"],
-            text=True,
-            stderr=subprocess.DEVNULL,
-        ).strip()
-    except (subprocess.SubprocessError, OSError):
-        return "unknown"
-
-
-def curve(values: list[float]) -> dict[str, list]:
-
-    return {"x": list(range(len(values))), "y": [float(v) for v in values]}
-
-
-def write_results(out: Path, entry: dict[str, Any], info: dict[str, Any]) -> None:
-    """Merge one model entry into the dataset's results file.
-
-    Read-modify-write rather than overwrite, so a later run of another model --
-    or a rerun of this one -- accumulates into the same file the way the
-    notebook's single `write_results` call does.
-    """
-
-    payload: dict[str, Any] = {}
-
-    if out.exists():
-        payload = json.loads(out.read_text())
-
-    payload.update({k: v for k, v in info.items() if k != "models"})
-    payload.setdefault("models", {}).update(entry)
-
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(payload, indent=2, default=str))
 
 
 # == main ======================================================================
@@ -374,9 +319,9 @@ def main() -> None:
     )
     print(
         f"  peak device {probe.peak_mb:.0f} MB of "
-        f"{torch.cuda.mem_get_info()[1] / 1e6:.0f} MB, host RSS {host_peak_mb():.0f} MB"
+        f"{gpu_total_mb(device):.0f} MB, host RSS {host_peak_rss_mb():.0f} MB"
         if device.startswith("cuda")
-        else f"  host RSS {host_peak_mb():.0f} MB",
+        else f"  host RSS {host_peak_rss_mb():.0f} MB",
         flush=True,
     )
 
@@ -395,7 +340,7 @@ def main() -> None:
                     if device.startswith("cuda")
                     else 0.0
                 ),
-                "host_peak_rss_mb": host_peak_mb(),
+                "host_peak_rss_mb": host_peak_rss_mb(),
                 "dense_train_matrix_gb": dense_gb,
                 "streamed": True,
                 "iter_batch_size": args.iter_batch_size,
