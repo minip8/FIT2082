@@ -81,6 +81,29 @@ def host_rss_mb() -> float:
         return 0.0
 
 
+def _meminfo(field: str) -> float:
+
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith(field):
+                    return float(line.split()[1]) / 1024
+    except OSError:
+        pass
+
+    return 0.0
+
+
+def host_free_mb() -> float:
+    """MemFree -- the number watchdogs tend to read, unlike MemAvailable.
+
+    Worth logging next to MemAvailable precisely because they disagree during a
+    streaming run, and it is the pessimistic one that gets runs killed.
+    """
+
+    return _meminfo("MemFree:")
+
+
 def host_available_mb() -> float:
     """MemAvailable, not MemFree.
 
@@ -90,15 +113,7 @@ def host_available_mb() -> float:
     succeed.
     """
 
-    try:
-        with open("/proc/meminfo") as f:
-            for line in f:
-                if line.startswith("MemAvailable:"):
-                    return float(line.split()[1]) / 1024
-    except OSError:
-        pass
-
-    return 0.0
+    return _meminfo("MemAvailable:")
 
 
 # == curves ====================================================================

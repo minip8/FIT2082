@@ -44,6 +44,7 @@ from fit2082.results import (
     gpu_total_mb,
     gpu_used_mb,
     host_available_mb,
+    host_free_mb,
     host_peak_rss_mb,
     host_rss_mb,
     write_results,
@@ -403,7 +404,22 @@ class StreamedQuant(xgb.DataIter):
         self._batches_seen += 1
 
         if self._drop_cache_every and self._batches_seen % self._drop_cache_every == 0:
+            # the input's own pages are dropped by RawStream; these are the
+            # ellpack pages xgboost has just written
             drop_page_cache(self._cache_dir)
+
+        # the build is several minutes of silence otherwise, and it is where
+        # both kills happened -- say what memory is doing while it runs
+        if self._batches_seen % 40 == 0:
+            written = sum(f.stat().st_size for f in self._cache_dir.glob("*"))
+
+            print(
+                f"    build pass {self.passes} batch {self._batches_seen:4d}  "
+                f"cache {written / 1e9:5.2f} GB  gpu {gpu_used_mb(self._device):5.0f} MB"
+                f"  rss {host_rss_mb():5.0f} MB  free {host_free_mb():5.0f} MB"
+                f"  avail {host_available_mb():5.0f} MB",
+                flush=True,
+            )
 
         return True
 
@@ -692,6 +708,11 @@ def main() -> None:
         seed=args.seed,
         drop_cache_every=args.drop_cache_every,
     )
+
+    # a previous run leaves the 8 GB .npy sitting in the page cache -- 5 GB of
+    # it here -- so every run after the first starts with MemFree near zero and
+    # is the one that gets killed. Start from a clean slate.
+    stream.drop_cache()
 
     raw_gb = tr.shape[0] * np.prod(stream._X.shape[1:]) * 4 / 1e9
 
