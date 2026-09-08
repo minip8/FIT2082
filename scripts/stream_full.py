@@ -26,6 +26,7 @@ pool is everything else.
 
 import argparse
 import mmap
+import os
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -44,6 +45,7 @@ from fit2082.results import (
     gpu_used_mb,
     host_available_mb,
     host_peak_rss_mb,
+    host_rss_mb,
     write_results,
 )
 
@@ -107,6 +109,9 @@ class RawStream:
         self._X = np.load(path_X, mmap_mode="r")
         self._Y = np.load(path_Y, mmap_mode="r")
 
+        # numpy closes the file it mmapped, so keep an fd of our own to advise on
+        self._fd = os.open(path_X, os.O_RDONLY)
+
         self.indices = indices
         self.batch_size = batch_size
         self.shuffle = shuffle
@@ -125,7 +130,11 @@ class RawStream:
         ms/batch that the sorted access pattern already assumes.
         """
 
+        # MADV_DONTNEED on a shared file mapping only zaps our page table
+        # entries -- the page cache keeps the pages, and MemFree stays low.
+        # Dropping the PTEs first is what then lets fadvise evict them.
         self._X._mmap.madvise(mmap.MADV_DONTNEED)
+        os.posix_fadvise(self._fd, 0, 0, os.POSIX_FADV_DONTNEED)
 
     def __len__(self) -> int:
 
@@ -273,7 +282,7 @@ def run_hashboost(
                     f"    round {rounds:5d}/{total_rounds}  "
                     f"tr={records['tr'][-1][1]:.4f} va={records['va'][-1][1]:.4f}  "
                     f"{time.perf_counter() - wall:6.0f}s  gpu {gpu_used_mb(device):5.0f} MB"
-                    f"  rss {host_peak_rss_mb():5.0f} MB  avail {host_available_mb():5.0f} MB",
+                    f"  rss {host_rss_mb():5.0f} MB  avail {host_available_mb():5.0f} MB",
                     flush=True,
                 )
 
@@ -371,7 +380,7 @@ class MemoryProbe(xgb.callback.TrainingCallback):
         print(
             f"    round {epoch + 1:4d}  {self.round_s[-1]:6.1f}s  "
             f"gpu {gpu_used_mb(self.device):5.0f} MB  "
-            f"rss {host_peak_rss_mb():5.0f} MB  avail {host_available_mb():5.0f} MB",
+            f"rss {host_rss_mb():5.0f} MB  avail {host_available_mb():5.0f} MB",
             flush=True,
         )
 

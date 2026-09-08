@@ -66,6 +66,21 @@ def host_peak_rss_mb() -> float:
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
 
 
+def host_rss_mb() -> float:
+    """Resident set *now*, unlike `host_peak_rss_mb`'s high-water mark.
+
+    A streaming run's RSS rises with the file pages it has touched and falls
+    when they are dropped, so the peak alone cannot show whether dropping is
+    working.
+    """
+
+    try:
+        with open("/proc/self/statm") as f:
+            return int(f.read().split()[1]) * resource.getpagesize() / 1e6
+    except (OSError, IndexError, ValueError):
+        return 0.0
+
+
 def host_available_mb() -> float:
     """MemAvailable, not MemFree.
 
