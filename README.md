@@ -2,6 +2,83 @@
 
 ## Benchmarks
 
+### streaming-baselines
+
+Streaming the whole LenDB training pool -- 975,291 rows -- through both models,
+against the 65,536 rows every earlier run used. Validation and test rows are
+held byte-identical to those runs, so only the training set size changes.
+
+    uv run python scripts/xgboost_baseline.py --dataset LenDB
+    uv run python scripts/stream_full.py --model hashboost --epochs 5
+    uv run python scripts/stream_full.py --model xgboost --num-boost-round 3
+
+Neither script materialises the features. The pool is 6.3 GB as raw series
+against 7.9 GB of host RAM, and 58 GB once QUANT expands it to 14,940 columns.
+
+| run | rows | rounds | tr | va best | wall | peak GPU | data resident |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| hashboost | 65,536 | 1200 | 0.0049 | **0.0532** | 230s | 2,572 MB | one batch |
+| hashboost | 975,291 | 1195 | 0.0608 | 0.0691 | 560s | 2,572 MB | one batch |
+| xgboost | 65,536 | 179 | 0.0236 | **0.0459** | 131s | 6,223 MB | whole ellpack in RAM |
+| xgboost | 975,291 | 3 | 0.0566 | 0.0627 | 702s | 6,021 MB | 14.6 GB paged from disk |
+
+#### Peak memory is flat in HashBoost and linear in XGBoost
+
+HashBoost took **2,572 MB for 65,536 rows and 2,572 MB for 975,291** -- the same
+number, because `fit_batch` folds a batch in and frees it, so the pool size never
+enters. That is the property that makes the full dataset reachable at all.
+
+XGBoost needs the whole binned matrix available for every boosting round, so
+streaming only moves where it lives. The ellpack is almost exactly one byte per
+element, which is worth knowing because a global symbol space would imply ~22
+bits and a 40 GB matrix:
+
+| rows | ellpack | s/round |
+| ---: | ---: | ---: |
+| 65,536 | in RAM | 0.68 |
+| 122,880 | 1.8 GB | 8.9 |
+| 245,760 | 3.7 GB | 16.2 |
+| 975,291 | 14.6 GB | 116.0 |
+
+Linear in rows, and 171x the in-memory cost per round at the full pool: 353s to
+build the ellpack, then every round pages 14.6 GB back off disk. Reaching the
+65,536-row run's 179 rounds would take about 6 hours.
+
+#### More data made HashBoost worse, because it is capacity-bound not data-bound
+
+At matched rounds the small run wins -- 0.0532 against 0.0691 -- on the same
+gradient steps, the same samples processed and identical capacity. The train
+errors say why: the 65,536-row model reaches **tr=0.0049**, having essentially
+memorised its training set, while the full-pool model sits at tr=0.0608 against
+va=0.0691. Train ~= validation is underfitting. 1,200 hashes is enough to
+memorise 65k rows and nowhere near enough for 975k, and the full-pool curve was
+still descending when it stopped.
+
+So this is not "more data hurts". It is that more data needs more rounds, and
+per-batch cost grows linearly with the number of rounds -- 50 passes over the
+full pool is ~9,000 rounds, roughly 60x the compute spent here. That quadratic
+is where HashBoost's scaling actually binds.
+
+#### Practical notes
+
+* Sort each batch's indices after the global shuffle. Same rows, but the memmap
+  reads go from scattered to near-sequential: 593 ms/batch to 64 ms.
+* Readahead reads 38x the bytes these scattered rows need. Leave it on anyway --
+  `MADV_RANDOM` cuts that to 1.6x but is 20x *slower* (1571 ms/batch against 78),
+  because sorting is what makes the kernel's bulk fetches pay off. Advise the
+  *mapping*: `posix_fadvise` on the fd governs `read()`, not page faults through
+  a memmap, and measured byte-for-byte identical.
+* Pay for the amplification by dropping the page cache periodically instead --
+  but not too often. Every 20 batches is fine; every 4 is pathological, because
+  `MADV_DONTNEED` resets the kernel's readahead state and it re-ramps: 3.7 GB
+  read per batch instead of 202 MB, and 16x slower.
+* Drop the input's cache at *startup* too. The 8 GB .npy leaves ~5 GB of itself
+  cached, so the second run of anything starts with MemFree at 195 MB.
+* `POSIX_FADV_DONTNEED` cannot evict a dirty page. XGBoost's ~15 GB of ellpack
+  writes need an fsync first or they sit in the page cache until the run dies.
+* Watch MemFree, not just MemAvailable. They disagree by 6 GB during a streaming
+  run, and it is the pessimistic one that gets runs killed.
+
 ### 5a36857
 
 Baseline with off-the-shelf models (XGBoost, LightGBM, CatBoost, DecisionTreeClassifier).
