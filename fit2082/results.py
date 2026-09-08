@@ -66,6 +66,26 @@ def host_peak_rss_mb() -> float:
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
 
 
+def host_available_mb() -> float:
+    """MemAvailable, not MemFree.
+
+    A streaming run holds most of its footprint as reclaimable page cache, so
+    MemFree reads as almost nothing while the machine is not short of memory at
+    all. MemAvailable is the number that says whether the next allocation will
+    succeed.
+    """
+
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return float(line.split()[1]) / 1024
+    except OSError:
+        pass
+
+    return 0.0
+
+
 # == curves ====================================================================
 
 

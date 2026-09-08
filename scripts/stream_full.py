@@ -25,8 +25,9 @@ pool is everything else.
 """
 
 import argparse
+import mmap
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,7 @@ from fit2082.results import (
     curve,
     gpu_total_mb,
     gpu_used_mb,
+    host_available_mb,
     host_peak_rss_mb,
     write_results,
 )
@@ -99,6 +101,7 @@ class RawStream:
         batch_size: int,
         seed: int = 0,
         shuffle: bool = True,
+        drop_cache_every: int = 50,
     ) -> None:
 
         self._X = np.load(path_X, mmap_mode="r")
@@ -107,8 +110,22 @@ class RawStream:
         self.indices = indices
         self.batch_size = batch_size
         self.shuffle = shuffle
+        self.drop_cache_every = drop_cache_every
 
         self._rng = np.random.default_rng(seed)
+
+    def drop_cache(self) -> None:
+        """Hand the pages we have already consumed back to the kernel.
+
+        An epoch pulls 6.3 GB of a 8.1 GB file through the page cache, which on
+        a 7.9 GB machine leaves `free` at a few hundred MB. The pages are clean
+        and reclaimable, so nothing is actually short of memory -- but enough
+        things watch `free` rather than `available` that the run gets killed
+        anyway. MADV_DONTNEED drops them outright; re-reading costs the 64
+        ms/batch that the sorted access pattern already assumes.
+        """
+
+        self._X._mmap.madvise(mmap.MADV_DONTNEED)
 
     def __len__(self) -> int:
 
@@ -118,10 +135,13 @@ class RawStream:
 
         order = self._rng.permutation(self.indices) if self.shuffle else self.indices
 
-        for start in range(0, order.shape[0], self.batch_size):
+        for i, start in enumerate(range(0, order.shape[0], self.batch_size)):
             batch = np.sort(order[start : start + self.batch_size])
 
             yield np.array(self._X[batch], dtype=np.float32), np.array(self._Y[batch])
+
+            if self.drop_cache_every and (i + 1) % self.drop_cache_every == 0:
+                self.drop_cache()
 
     def gather(self, indices: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Read one fixed set of rows, for the held-out slices."""
@@ -157,6 +177,7 @@ def run_hashboost(
     num_classes: int,
     args: argparse.Namespace,
     device: str,
+    checkpoint: Callable[[dict[str, Any]], None],
 ) -> dict[str, Any]:
 
     total_rounds = args.epochs * len(stream)
@@ -197,6 +218,27 @@ def run_hashboost(
                 error = (model.predict(X).argmax(-1) != Y).to(torch.float32).mean()
                 records[name].append((rounds, error.item()))
 
+    def entry(elapsed: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "x_name": "round",
+            "params": params,
+            "timings": [elapsed],
+            "memory": {
+                "device_peak_mb": peak_mb,
+                "device_total_mb": gpu_total_mb(device),
+                "host_peak_rss_mb": host_peak_rss_mb(),
+                "streamed": True,
+                "batch_size": stream.batch_size,
+                "resident": "one batch",
+            },
+            "rounds": rounds,
+            "stream_s": stream_s,
+            "results": {
+                name: {"merror": curve([e for _, e in rec], [r for r, _ in rec])}
+                for name, rec in records.items()
+            },
+        }
+
     wall, cpu = time.perf_counter(), time.process_time()
 
     for _ in range(args.epochs):
@@ -215,10 +257,23 @@ def run_hashboost(
                 evaluate()
                 peak_mb = max(peak_mb, gpu_used_mb(device))
 
+                # a streamed run is long and has already been killed once by
+                # a low-memory watchdog; write what exists after every eval
+                checkpoint(
+                    entry(
+                        {
+                            "phase": "train",
+                            "wall_s": time.perf_counter() - wall,
+                            "cpu_s": time.process_time() - cpu,
+                        }
+                    )
+                )
+
                 print(
                     f"    round {rounds:5d}/{total_rounds}  "
                     f"tr={records['tr'][-1][1]:.4f} va={records['va'][-1][1]:.4f}  "
-                    f"{time.perf_counter() - wall:6.0f}s  {gpu_used_mb(device):5.0f} MB",
+                    f"{time.perf_counter() - wall:6.0f}s  gpu {gpu_used_mb(device):5.0f} MB"
+                    f"  rss {host_peak_rss_mb():5.0f} MB  avail {host_available_mb():5.0f} MB",
                     flush=True,
                 )
 
@@ -236,24 +291,7 @@ def run_hashboost(
         flush=True,
     )
 
-    return {
-        "x_name": "round",
-        "params": params,
-        "timings": [elapsed],
-        "memory": {
-            "device_peak_mb": peak_mb,
-            "device_total_mb": gpu_total_mb(device),
-            "host_peak_rss_mb": host_peak_rss_mb(),
-            "streamed": True,
-            "batch_size": stream.batch_size,
-            "resident": "one batch",
-        },
-        "stream_s": stream_s,
-        "results": {
-            name: {"merror": curve([e for _, e in rec], [r for r, _ in rec])}
-            for name, rec in records.items()
-        },
-    }
+    return entry(elapsed)
 
 
 # == xgboost ===================================================================
@@ -307,12 +345,15 @@ class StreamedQuant(xgb.DataIter):
 class MemoryProbe(xgb.callback.TrainingCallback):
     """Samples device usage and per-round wall time once a round."""
 
-    def __init__(self, device: str) -> None:
+    def __init__(
+        self, device: str, on_round: Callable[[Any], None] | None = None
+    ) -> None:
 
         self.device = device
         self.peak_mb = gpu_used_mb(device)
         self.round_s: list[float] = []
         self._last = time.perf_counter()
+        self._on_round = on_round
 
     def after_iteration(self, model: Any, epoch: int, evals_log: Any) -> bool:
 
@@ -322,9 +363,15 @@ class MemoryProbe(xgb.callback.TrainingCallback):
         self._last = now
         self.peak_mb = max(self.peak_mb, gpu_used_mb(self.device))
 
+        # each round pages the whole ellpack off disk, so rounds are minutes
+        # apart -- write the curve out as it goes rather than only at the end
+        if self._on_round is not None:
+            self._on_round(evals_log)
+
         print(
             f"    round {epoch + 1:4d}  {self.round_s[-1]:6.1f}s  "
-            f"{gpu_used_mb(self.device):5.0f} MB",
+            f"gpu {gpu_used_mb(self.device):5.0f} MB  "
+            f"rss {host_peak_rss_mb():5.0f} MB  avail {host_available_mb():5.0f} MB",
             flush=True,
         )
 
@@ -338,6 +385,7 @@ def run_xgboost(
     num_classes: int,
     args: argparse.Namespace,
     device: str,
+    checkpoint: Callable[[dict[str, Any]], None],
 ) -> dict[str, Any]:
 
     params = {
@@ -394,9 +442,49 @@ def run_xgboost(
     torch.cuda.empty_cache() if device.startswith("cuda") else None
 
     evals_result: dict[str, Any] = {}
-    probe = MemoryProbe(device)
+
+    def entry(log: Any, train: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "x_name": "round",
+            "params": params,
+            "timings": [build, train],
+            "memory": {
+                "device_peak_mb": probe.peak_mb,
+                "device_total_mb": gpu_total_mb(device),
+                "host_peak_rss_mb": host_peak_rss_mb(),
+                "streamed": True,
+                "external_memory": True,
+                "cache_gb": cache_bytes / 1e9,
+                "build_passes": it.passes,
+                "cuda_async_pool": args.cuda_async_pool,
+                "batch_size": stream.batch_size,
+                "resident": "paged from disk",
+            },
+            "seconds_per_round": float(np.mean(probe.round_s))
+            if probe.round_s
+            else 0.0,
+            "results": {
+                name: {"merror": curve(log[name]["merror"])}
+                for _, name in evals
+                if name in log
+            },
+        }
 
     train_wall, train_cpu = time.perf_counter(), time.process_time()
+
+    probe = MemoryProbe(
+        device,
+        on_round=lambda log: checkpoint(
+            entry(
+                log,
+                {
+                    "phase": "train",
+                    "wall_s": time.perf_counter() - train_wall,
+                    "cpu_s": time.process_time() - train_cpu,
+                },
+            )
+        ),
+    )
 
     booster = xgb.train(
         {
@@ -429,26 +517,8 @@ def run_xgboost(
     )
 
     return {
-        "x_name": "round",
-        "params": params,
-        "timings": [build, train],
-        "memory": {
-            "device_peak_mb": probe.peak_mb,
-            "device_total_mb": gpu_total_mb(device),
-            "host_peak_rss_mb": host_peak_rss_mb(),
-            "streamed": True,
-            "external_memory": True,
-            "cache_gb": cache_bytes / 1e9,
-            "build_passes": it.passes,
-            "cuda_async_pool": args.cuda_async_pool,
-            "batch_size": stream.batch_size,
-            "resident": "paged from disk",
-        },
+        **entry(evals_result, train),
         "best_iteration": int(booster.best_iteration),
-        "seconds_per_round": float(np.mean(probe.round_s)),
-        "results": {
-            name: {"merror": curve(evals_result[name]["merror"])} for _, name in evals
-        },
     }
 
 
@@ -478,6 +548,12 @@ def main() -> None:
     )
     parser.add_argument("--batch-size", type=int, default=4096)
     parser.add_argument("--eval-subsample", type=int, default=4096)
+    parser.add_argument(
+        "--drop-cache-every",
+        type=int,
+        default=50,
+        help="batches between MADV_DONTNEED on the data file (0 = never)",
+    )
     # hashboost
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--num-bits", type=int, default=8)
@@ -513,7 +589,14 @@ def main() -> None:
     path_X = f"{args.path}/{args.dataset}/{args.dataset}_X.npy"
     path_Y = f"{args.path}/{args.dataset}/{args.dataset}_y.npy"
 
-    stream = RawStream(path_X, path_Y, tr, args.batch_size, seed=args.seed)
+    stream = RawStream(
+        path_X,
+        path_Y,
+        tr,
+        args.batch_size,
+        seed=args.seed,
+        drop_cache_every=args.drop_cache_every,
+    )
 
     raw_gb = tr.shape[0] * np.prod(stream._X.shape[1:]) * 4 / 1e9
 
@@ -543,36 +626,37 @@ def main() -> None:
         flush=True,
     )
 
-    runner = run_hashboost if args.model == "hashboost" else run_xgboost
-    entry = runner(stream, quant, holdouts, num_classes, args, device)
+    out = Path(args.out) / f"{args.dataset}-full-{commit_hash()}.json"
 
-    out = write_results(
-        Path(args.out) / f"{args.dataset}-full-{commit_hash()}.json",
-        {args.model: entry},
-        {
-            "commit": commit_hash(),
-            "dataset": args.dataset,
-            "device": device,
-            "split": {
-                "fold": 0,
-                "seed": args.seed,
-                "n_tr": int(tr.shape[0]),
-                "n_va": int(va.shape[0]),
-                "n_te": int(te.shape[0]),
-                "n_eval_subsample": args.eval_subsample,
-                "batch_size": args.batch_size,
-                "num_classes": num_classes,
-                "streamed": True,
-                "reference_n_tr": args.n_ref,
-            },
-            "transform": {
-                "name": "quant",
-                "depth": quant.depth,
-                "div": quant.div,
-                "num_features": num_features,
-            },
+    info = {
+        "commit": commit_hash(),
+        "dataset": args.dataset,
+        "device": device,
+        "split": {
+            "fold": 0,
+            "seed": args.seed,
+            "n_tr": int(tr.shape[0]),
+            "n_va": int(va.shape[0]),
+            "n_te": int(te.shape[0]),
+            "n_eval_subsample": args.eval_subsample,
+            "batch_size": args.batch_size,
+            "num_classes": num_classes,
+            "streamed": True,
+            "reference_n_tr": args.n_ref,
         },
-    )
+        "transform": {
+            "name": "quant",
+            "depth": quant.depth,
+            "div": quant.div,
+            "num_features": num_features,
+        },
+    }
+
+    def checkpoint(entry: dict[str, Any]) -> None:
+        write_results(out, {args.model: entry}, info)
+
+    runner = run_hashboost if args.model == "hashboost" else run_xgboost
+    checkpoint(runner(stream, quant, holdouts, num_classes, args, device, checkpoint))
 
     print(f"\nwrote {out}", flush=True)
 
