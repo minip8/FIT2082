@@ -35,6 +35,7 @@ from typing import Any
 import numpy as np
 import torch
 import xgboost as xgb
+import xgboost.callback
 
 from fit2082.boost import HashBoost
 from fit2082.quant.quant import Quant
