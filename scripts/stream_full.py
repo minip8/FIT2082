@@ -1,9 +1,18 @@
-"""Train HashBoost and XGBoost on the *whole* LenDB training pool by streaming.
+"""Train HashBoost and XGBoost on a dataset's *whole* training pool by streaming.
 
-The earlier runs use 65,536 rows because that is what fits. The full pool is
-975,291 rows: 6.3 GB as raw series against 7.9 GB of host RAM, and 58 GB once
-QUANT expands it to 14,940 features. Nothing here is ever fully resident --
-batches are read from the .npy memmap, transformed on the GPU, and dropped.
+The fixed-size runs use 65,536 rows because that is what fits once QUANT has
+expanded them. Nothing here is ever fully resident -- batches are read from the
+.npy memmap, transformed on the GPU, and dropped -- so the pool can be as large
+as the dataset is.
+
+LenDB is the case that forced it, and the figures quoted throughout are
+measured there: 975,291 training rows, 6.3 GB as raw series against 7.9 GB of
+host RAM, and 58 GB once QUANT expands them to 14,940 features. None of it is
+specific to LenDB. `--dataset` takes any directory under `--path` laid out as
+`<dataset>/<dataset>_X.npy`, `<dataset>/<dataset>_y.npy` and
+`test_indices_fold_0.txt`; the machinery that only earns its keep on a dataset
+too big for RAM -- evicting the page cache, paging the ellpack off disk --
+sizes itself to the data and turns itself off when it is not needed.
 
 The two models meet that constraint very differently, which is the comparison
 worth having:
@@ -16,12 +25,16 @@ worth having:
   Streaming only changes where that matrix lives -- `ExtMemQuantileDMatrix`
   writes the ellpack to disk once and pages it back on each round.
 
-The validation and test rows are held byte-identical to the 65,536-row runs, so
-the curves here are directly comparable to `results/LenDB-*.json`; the training
-pool is everything else.
+The validation and test rows are held byte-identical to the fixed-size run on
+the same dataset, so the curves here are directly comparable to
+`results/<dataset>-*.json`; the training pool is everything else. That hinges on
+`--n-ref` matching the row count that run trained on, because it is the offset
+the held-out slices are cut at -- `REFERENCE_N_REF` records the ones already
+run, and is what `--n-ref` defaults to.
 
-    uv run python scripts/stream_full.py --model hashboost --epochs 5
-    uv run python scripts/stream_full.py --model xgboost --num-boost-round 50
+    uv run python scripts/stream_full.py --dataset LenDB --model hashboost --epochs 5
+    uv run python scripts/stream_full.py --dataset Traffic --model xgboost \
+        --num-boost-round 50
 """
 
 import argparse
@@ -53,6 +66,14 @@ from fit2082.results import (
 
 # == split =====================================================================
 
+# `n_ref` decides where the validation and test slices are cut out of the
+# shuffle, so a streamed run has to reuse the value of the run it is being
+# compared against even though it trains on the whole pool regardless. These are
+# what the fixed-size runs in `results/` used: everything took 65,536 except
+# InsectSound, whose 40,000 rows outside fold 0 could not hold it.
+DEFAULT_N_REF = 32768 * 2
+REFERENCE_N_REF = {"InsectSound": 32768}
+
 
 def split_indices(
     path: str, dataset: str, seed: int, n_ref: int, n_va: int, n_te: int
@@ -63,7 +84,7 @@ def split_indices(
     `n_ref` for training, then `n_va` and `n_te`. Reproducing that shuffle and
     keeping the same validation and test slices means the only thing that
     changes here is the size of the training set -- the numbers stay comparable
-    to every earlier LenDB run.
+    to every earlier run on the same dataset.
     """
 
     np.random.seed(seed)
@@ -73,9 +94,22 @@ def split_indices(
 
     ix = np.setdiff1d(np.arange(Y.shape[0]), fold)
 
+    # a pool too small to reach the validation slice at all would leave the run
+    # with nothing to evaluate on, several hours in
+    if n_ref + n_va > ix.shape[0]:
+        raise SystemExit(
+            f"{dataset}: {ix.shape[0]} rows outside fold 0 cannot hold "
+            f"--n-ref {n_ref} plus --n-va {n_va}. Lower --n-ref to whatever the "
+            f"run this one is meant to be comparable with trained on."
+        )
+
     np.random.shuffle(ix)
 
     va = ix[n_ref : n_ref + n_va]
+
+    # slicing truncates rather than raises: a pool with no room for a full test
+    # slice gets the short one the reference run got, and te is held out either
+    # way. Only `n_te` rows the reference run *did* see would be a problem.
     te = ix[n_ref + n_va : n_ref + n_va + n_te]
 
     # the reference run's training rows, plus everything it never looked at
@@ -138,11 +172,11 @@ class RawStream:
     def drop_cache(self) -> None:
         """Hand the pages we have already consumed back to the kernel.
 
-        An epoch pulls 6.3 GB of a 8.1 GB file through the page cache, which on
-        a 7.9 GB machine leaves `free` at a few hundred MB. The pages are clean
-        and reclaimable, so nothing is actually short of memory -- but enough
-        things watch `free` rather than `available` that the run gets killed
-        anyway. MADV_DONTNEED drops them outright; re-reading costs the 64
+        A LenDB epoch pulls 6.3 GB of an 8.1 GB file through the page cache,
+        which on a 7.9 GB machine leaves `free` at a few hundred MB. The pages
+        are clean and reclaimable, so nothing is actually short of memory -- but
+        enough things watch `free` rather than `available` that the run gets
+        killed anyway. MADV_DONTNEED drops them outright; re-reading costs the 64
         ms/batch that the sorted access pattern already assumes.
         """
 
@@ -174,6 +208,22 @@ class RawStream:
         order = np.sort(indices)
 
         return np.array(self._X[order], dtype=np.float32), np.array(self._Y[order])
+
+
+def auto_drop_cache_every(path_X: str, every: int = 50) -> int:
+    """Evict the page cache only for a file large enough to crowd host RAM.
+
+    Dropping the cache is what keeps a LenDB-sized run alive, but it is pure
+    loss on a dataset that fits: Pedestrian's series are 18 MB, so the kernel
+    would happily hold the whole file for the length of the run and re-reading
+    it every 50 batches buys nothing. Compare the file against what the machine
+    can actually spare rather than against a fixed threshold -- the same dataset
+    is worth streaming carefully on a small box and not on a large one.
+    """
+
+    size_mb = Path(path_X).stat().st_size / 1e6
+
+    return every if size_mb > 0.5 * host_available_mb() else 0
 
 
 def drop_page_cache(directory: Path) -> None:
@@ -370,8 +420,9 @@ class StreamedQuant(xgb.DataIter):
     """Feeds the streamed QUANT features to XGBoost's external-memory builder.
 
     `on_host=False` sends the cached ellpack pages to `cache_prefix` on disk:
-    the full pool bins to roughly 40 GB, which fits neither the 8 GB card nor
-    the 7.9 GB of host RAM.
+    LenDB's full pool bins to roughly 40 GB, which fits neither the 8 GB card
+    nor the 7.9 GB of host RAM. A dataset whose ellpack would fit is written to
+    disk all the same -- external memory is the thing being measured.
     """
 
     def __init__(
@@ -509,6 +560,17 @@ def run_xgboost(
     cache = Path(args.cache_dir)
     cache.mkdir(parents=True, exist_ok=True)
 
+    # one directory per dataset, so the size reported below is this run's
+    # ellpack and not whatever an interrupted run on another dataset left
+    # behind. xgboost overwrites its own pages, but a shorter run leaves the
+    # tail of a longer one lying there, so clear the prefix first.
+    stale = sorted(cache.glob(f"{args.dataset.lower()}*"))
+
+    if stale:
+        print(f"  clearing {len(stale)} stale cache file(s) from {cache}", flush=True)
+        for path in stale:
+            path.unlink()
+
     # xgboost warns that paging external memory without a pooled allocator is
     # slow. `use_cuda_async_pool` is cudaMallocAsync, built into the driver --
     # unlike `use_rmm` it needs nothing installed.
@@ -521,7 +583,7 @@ def run_xgboost(
         stream,
         quant,
         device,
-        str(cache / "lendb"),
+        str(cache / args.dataset.lower()),
         drop_cache_every=args.drop_cache_every,
     )
     dtrain = xgb.ExtMemQuantileDMatrix(
@@ -542,7 +604,7 @@ def run_xgboost(
         "cpu_s": time.process_time() - build_cpu,
     }
 
-    cache_bytes = sum(f.stat().st_size for f in cache.glob("*"))
+    cache_bytes = sum(f.stat().st_size for f in cache.glob(f"{args.dataset.lower()}*"))
 
     print(
         f"  ellpack built in {build['wall_s']:.0f}s over {it.passes} passes; "
@@ -658,8 +720,11 @@ def main() -> None:
     parser.add_argument(
         "--n-ref",
         type=int,
-        default=32768 * 2,
-        help="training rows the reference run used",
+        default=None,
+        help="training rows the reference run used -- the offset the held-out "
+        "slices are cut at (default: "
+        + "".join(f"{k} {v}, " for k, v in REFERENCE_N_REF.items())
+        + f"else {DEFAULT_N_REF})",
     )
     parser.add_argument("--n-va", type=int, default=4096)
     parser.add_argument("--n-te", type=int, default=4096)
@@ -671,8 +736,9 @@ def main() -> None:
     parser.add_argument(
         "--drop-cache-every",
         type=int,
-        default=50,
-        help="batches between MADV_DONTNEED on the data file (0 = never)",
+        default=None,
+        help="batches between MADV_DONTNEED on the data file (0 = never; "
+        "default: every 50 if the series file would crowd host RAM, else never)",
     )
     # hashboost
     parser.add_argument("--epochs", type=int, default=5)
@@ -685,7 +751,12 @@ def main() -> None:
     parser.add_argument("--learning-rate", type=float, default=0.05)
     parser.add_argument("--num-boost-round", type=int, default=1000)
     parser.add_argument("--early-stopping-rounds", type=int, default=50)
-    parser.add_argument("--cache-dir", default="/tmp/xgb-extmem")
+    parser.add_argument(
+        "--cache-dir",
+        default=None,
+        help="where xgboost writes its ellpack pages "
+        "(default: /tmp/xgb-extmem/<dataset>)",
+    )
     parser.add_argument(
         "--random-access",
         action="store_true",
@@ -710,6 +781,12 @@ def main() -> None:
 
     device = args.device
 
+    if args.n_ref is None:
+        args.n_ref = REFERENCE_N_REF.get(args.dataset, DEFAULT_N_REF)
+
+    if args.cache_dir is None:
+        args.cache_dir = f"/tmp/xgb-extmem/{args.dataset}"
+
     tr, va, te = split_indices(
         args.path, args.dataset, args.seed, args.n_ref, args.n_va, args.n_te
     )
@@ -719,6 +796,9 @@ def main() -> None:
 
     path_X = f"{args.path}/{args.dataset}/{args.dataset}_X.npy"
     path_Y = f"{args.path}/{args.dataset}/{args.dataset}_y.npy"
+
+    if args.drop_cache_every is None:
+        args.drop_cache_every = auto_drop_cache_every(path_X)
 
     stream = RawStream(
         path_X,
@@ -730,10 +810,12 @@ def main() -> None:
         random_access=args.random_access,
     )
 
-    # a previous run leaves the 8 GB .npy sitting in the page cache -- 5 GB of
-    # it here -- so every run after the first starts with MemFree near zero and
-    # is the one that gets killed. Start from a clean slate.
-    stream.drop_cache()
+    # a previous run leaves LenDB's 8 GB .npy sitting in the page cache -- 5 GB
+    # of it here -- so every run after the first starts with MemFree near zero
+    # and is the one that gets killed. Start from a clean slate. A file small
+    # enough that we are not evicting during the run is not worth evicting now.
+    if args.drop_cache_every:
+        stream.drop_cache()
 
     raw_gb = tr.shape[0] * np.prod(stream._X.shape[1:]) * 4 / 1e9
 
@@ -741,8 +823,17 @@ def main() -> None:
 
     print(
         f"{args.dataset}: streaming {tr.shape[0]} training rows "
-        f"({raw_gb:.1f} GB raw, {tr.shape[0] * num_features * 4 / 1e9:.0f} GB as "
+        f"({raw_gb:.1f} GB raw, {tr.shape[0] * num_features * 4 / 1e9:.1f} GB as "
         f"{num_features} QUANT features -- neither materialised)",
+        flush=True,
+    )
+    print(
+        f"  reference run trained on {args.n_ref}; "
+        + (
+            f"evicting the page cache every {args.drop_cache_every} batches"
+            if args.drop_cache_every
+            else "leaving the series in the page cache (it fits)"
+        ),
         flush=True,
     )
 
