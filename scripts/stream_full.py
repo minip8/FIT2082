@@ -35,6 +35,14 @@ run, and is what `--n-ref` defaults to.
     uv run python scripts/stream_full.py --dataset LenDB --model hashboost --epochs 5
     uv run python scripts/stream_full.py --dataset Traffic --model xgboost \
         --num-boost-round 50
+
+Arguments can also be piped in with `--stdin`, which is easier to generate than
+a command line when the same script is being run over several datasets --
+`fit2082.cli` has the details.
+
+    jq -c '.runs[]' sweep.json | while read -r run; do
+        echo "$run" | uv run python scripts/stream_full.py --stdin
+    done
 """
 
 import argparse
@@ -51,6 +59,7 @@ import xgboost as xgb
 import xgboost.callback
 
 from fit2082.boost import HashBoost
+from fit2082.cli import parse_args
 from fit2082.quant.quant import Quant
 from fit2082.results import (
     commit_hash,
@@ -777,7 +786,7 @@ def main() -> None:
     parser.add_argument(
         "--device", default="cuda" if torch.cuda.is_available() else "cpu"
     )
-    args = parser.parse_args()
+    args = parse_args(parser)
 
     device = args.device
 

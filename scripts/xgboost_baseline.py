@@ -17,6 +17,12 @@ The split is reproduced exactly as the notebook draws it -- same fold, same
 run already in `results/`.
 
     uv run python scripts/xgboost_baseline.py --dataset LenDB
+
+`--stdin` takes the same arguments on a pipe instead, written as flags or as a
+JSON object; see `fit2082.cli`.
+
+    echo '{"dataset": "LenDB", "max_depth": 8}' \
+        | uv run python scripts/xgboost_baseline.py --stdin
 """
 
 import argparse
@@ -31,6 +37,7 @@ import torch
 import xgboost as xgb
 import xgboost.callback
 
+from fit2082.cli import parse_args
 from fit2082.demo.utils import Dataset
 from fit2082.quant.quant import Quant
 from fit2082.results import (
@@ -177,7 +184,7 @@ def main() -> None:
     parser.add_argument(
         "--device", default="cuda" if torch.cuda.is_available() else "cpu"
     )
-    args = parser.parse_args()
+    args = parse_args(parser)
 
     device = args.device
 

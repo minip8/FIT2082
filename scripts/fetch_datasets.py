@@ -17,6 +17,11 @@ Usage:
     uv run scripts/fetch_datasets.py Traffic LenDB
     uv run scripts/fetch_datasets.py AudioMNIST --folds all
     uv run scripts/fetch_datasets.py Traffic --dry-run
+
+`--stdin` reads the same arguments from a pipe, so a list of names kept in a
+file does not have to be pasted onto a command line:
+
+    uv run scripts/fetch_datasets.py --stdin --folds all < datasets.txt
 """
 
 import argparse
@@ -27,6 +32,8 @@ from pathlib import Path
 import numpy as np
 from huggingface_hub import HfApi, hf_hub_download, list_repo_files
 from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError
+
+from fit2082.cli import parse_args
 
 # == datasets ==================================================================
 
@@ -181,7 +188,7 @@ def main() -> None:
     parser.add_argument(
         "--dry-run", action="store_true", help="print download sizes and exit"
     )
-    args = parser.parse_args()
+    args = parse_args(parser)
 
     if args.list:
         width = max(len(name) for name in DATASETS)
