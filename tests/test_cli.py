@@ -39,7 +39,7 @@ def pipe(monkeypatch):
 
     def feed(text: str) -> None:
         stream = io.StringIO(text)
-        stream.isatty = lambda: False  # type: ignore[method-assign]
+        monkeypatch.setattr(stream, "isatty", lambda: False)
         monkeypatch.setattr("sys.stdin", stream)
 
     return feed
@@ -222,7 +222,7 @@ def test_empty_stdin_leaves_the_defaults(parser, pipe):
 def test_stdin_flag_on_a_terminal_is_rejected(parser, monkeypatch):
 
     stream = io.StringIO("")
-    stream.isatty = lambda: True  # type: ignore[method-assign]
+    monkeypatch.setattr(stream, "isatty", lambda: True)
     monkeypatch.setattr("sys.stdin", stream)
 
     with pytest.raises(SystemExit):
