@@ -58,7 +58,7 @@ import torch
 import xgboost as xgb
 import xgboost.callback
 
-from fit2082.boost import HashBoost
+from fit2082.boost import BaggedHashBoost, HashBoost
 from fit2082.cli import parse_args
 from fit2082.quant.quant import Quant
 from fit2082.results import (
@@ -289,30 +289,36 @@ def run_hashboost(
     checkpoint: Callable[[dict[str, Any]], None],
 ) -> dict[str, Any]:
 
+    # `rounds` below counts batches, as it always has, so curves stay comparable
+    # across runs. Each batch adds `hashes_per_round` hashes to every estimator,
+    # which is what `max_num_hashes` has to be sized for.
     total_rounds = args.epochs * len(stream)
 
-    params = {
+    kwargs: dict[str, Any] = {
         "num_classes": num_classes,
         "num_bits": args.num_bits,
         "lr": args.lr,
-        "max_num_hashes": total_rounds + 1,
-        "hashes_per_round": 1,
-        "max_epochs": args.epochs,
+        "max_num_hashes": total_rounds * args.hashes_per_round + 1,
+        "hashes_per_round": args.hashes_per_round,
+        "shrinkage_tau": args.shrinkage_tau,
     }
+
+    params = {**kwargs, "max_epochs": args.epochs, "estimators": args.estimators}
 
     torch.manual_seed(args.seed)
 
-    model = HashBoost(
-        num_classes=num_classes,
-        num_bits=args.num_bits,
-        lr=args.lr,
-        max_num_hashes=total_rounds + 1,
-        hashes_per_round=1,
-        device=device,
+    # Bagging shares the stream: each batch is read and transformed once and
+    # handed to every estimator, so the I/O is not paid E times over.
+    model: HashBoost | BaggedHashBoost = (
+        HashBoost(**kwargs, device=device)
+        if args.estimators == 1
+        else BaggedHashBoost(num_estimators=args.estimators, **kwargs, device=device)
     )
 
     print(
-        f"  {len(stream)} batches/epoch x {args.epochs} epochs = {total_rounds} rounds",
+        f"  {len(stream)} batches/epoch x {args.epochs} epochs = {total_rounds} rounds"
+        f" ({total_rounds * args.hashes_per_round * args.estimators} hashes over "
+        f"{args.estimators} estimator(s))",
         flush=True,
     )
 
@@ -754,6 +760,24 @@ def main() -> None:
     parser.add_argument("--num-bits", type=int, default=8)
     parser.add_argument("--lr", type=float, default=0.1)
     parser.add_argument("--eval-every", type=int, default=20)
+    parser.add_argument(
+        "--hashes-per-round",
+        type=int,
+        default=1,
+        help="hashes added per batch; cost is quadratic in the hash count",
+    )
+    parser.add_argument(
+        "--estimators",
+        type=int,
+        default=1,
+        help="bag this many independent models (capacity at ~linear cost)",
+    )
+    parser.add_argument(
+        "--shrinkage-tau",
+        type=float,
+        default=0.0,
+        help="mass-adaptive leaf smoothing; scale with rows x epochs / 2**num_bits",
+    )
     # xgboost
     parser.add_argument("--max-bin", type=int, default=256)
     parser.add_argument("--max-depth", type=int, default=6)
