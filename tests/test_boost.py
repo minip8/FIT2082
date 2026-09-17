@@ -16,6 +16,7 @@ import torch
 from fit2082.boost import (
     AxisAlignedPartitioner,
     BaggedHashBoost,
+    HardPairSplitter,
     HashBoost,
     HashTables,
     ObliquePartitioner,
@@ -528,6 +529,66 @@ def test_bagging_averages_estimators(device):
 
     expected = torch.stack([e.predict_proba(X) for e in bagged.estimators]).mean(0)
     assert torch.allclose(probabilities, expected, atol=1e-6)
+
+
+# == split selection ===========================================================
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_sampled_pair_order_is_random_but_stays_on_hard_examples(device):
+    """Loss-proportional order: reproducible, varied, and blind to fitted rows.
+
+    Half the batch is fitted (true class at probability ~1, cross entropy
+    ~3e-7) and half is uniformly confused (cross entropy log 4). The strict
+    ranking puts every confused example first; the sampled one must too, in
+    an order that changes with the generator and repeats with its seed.
+    """
+
+    n, k = 512, 4
+    _, Y, _ = _data(n=n, k=k)
+    Yd = torch.as_tensor(Y.astype(np.int64), device=device)
+
+    fitted = torch.arange(n, device=device) < n // 2
+
+    probabilities = torch.full((n, k), 1.0 / k, device=device)
+    probabilities[fitted] = 1e-7
+    probabilities[fitted, Yd[fitted]] = 1 - (k - 1) * 1e-7
+
+    def order(sample, seed=0):
+        generator = torch.Generator(device=device).manual_seed(seed)
+        return HardPairSplitter(generator=generator, sample=sample).order(
+            probabilities, Yd
+        )
+
+    strict = order(False)
+    assert not fitted[strict[: n // 2]].any()
+
+    sampled = order(True)
+    assert not fitted[sampled[:64]].any()
+
+    assert torch.equal(sampled, order(True, seed=0))
+    assert not torch.equal(sampled[:64], order(True, seed=1)[:64])
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_sampled_pairs_train(device):
+
+    X, Y, k = _data()
+
+    model = HashBoost(
+        num_classes=k,
+        max_num_hashes=21,
+        device=device,
+        splitter=HardPairSplitter(sample=True),
+    )
+
+    for _ in range(20):
+        model.fit_batch(X, Y)
+
+    logits = model.predict(X)
+
+    assert torch.isfinite(logits).all()
+    assert (logits.argmax(-1) != model._Y(Y)).float().mean() < 0.9
 
 
 # == partition families ========================================================

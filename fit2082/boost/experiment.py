@@ -22,7 +22,12 @@ from typing import Any
 import numpy as np
 import torch
 
-from fit2082.boost import BaggedHashBoost, HashBoost, ObliquePartitioner
+from fit2082.boost import (
+    BaggedHashBoost,
+    HardPairSplitter,
+    HashBoost,
+    ObliquePartitioner,
+)
 from fit2082.boost.readout import fit_readout
 from fit2082.demo.utils import Dataset
 from fit2082.quant.quant import Quant
@@ -301,6 +306,12 @@ VARIANTS: dict[str, dict[str, Any]] = {
         "hashes_per_round": 2,
         "readout": {"rung": "table", "lam": 0.1, "lr": 0.01},
     },
+    # -- sampled hard pairs ---------------------------------------------------
+    # The strict ranking forms pairs from the same few hardest examples every
+    # time a batch comes round; sampling in proportion to cross entropy keeps
+    # them on hard examples but spreads them. The splitter holds no per-round
+    # state, so one instance is safe to share across seeds and estimators.
+    "sampled_pairs": {"splitter": HardPairSplitter(sample=True)},
 }
 
 

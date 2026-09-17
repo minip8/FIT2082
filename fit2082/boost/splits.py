@@ -94,11 +94,51 @@ class HardPairSplitter:
     Ranks examples by cross entropy (hardest first), pairs up examples of
     differing classes, then for each pair picks a random feature and splits at
     the midpoint of the pair's two values for that feature.
+
+    With `sample=True` the ranking is itself drawn at random: examples are
+    ordered as successive draws without replacement, each with probability
+    proportional to its cross entropy. The strict ranking pairs the same dozen
+    or so hardest examples every time a batch comes round, and once the batch
+    is memorised those are its persistent outliers; sampling keeps the pairs on
+    hard examples but spreads them across the hard end of the batch. Screened
+    as a small win on Pedestrian and neutral on four other datasets -- see the
+    README.
     """
 
-    def __init__(self, generator: torch.Generator | None = None) -> None:
+    def __init__(
+        self, generator: torch.Generator | None = None, sample: bool = False
+    ) -> None:
 
         self.generator = generator
+        self.sample = sample
+
+    def order(self, probabilities: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
+        """-> (n,) example indices, in the order pairs are formed from them."""
+
+        tiny = torch.finfo(probabilities.dtype).tiny
+
+        cross_entropy = (
+            -probabilities.gather(1, Y[:, None]).squeeze(1).clamp_min(tiny).log()
+        )
+
+        if not self.sample:
+            return torch.argsort(cross_entropy, descending=True)
+
+        # Gumbel-top-k: sorting log(w) plus Gumbel noise orders the examples
+        # exactly as successive draws without replacement with probability
+        # w / sum(w). An example the model already fits has cross entropy ~0,
+        # so a log weight near log(tiny), and is in effect never drawn.
+        uniform = torch.rand(
+            cross_entropy.shape,
+            device=cross_entropy.device,
+            generator=self.generator,
+        ).clamp_min(tiny)
+
+        gumbel = -(-uniform.log()).log()
+
+        return torch.argsort(
+            cross_entropy.clamp_min(tiny).log() + gumbel, descending=True
+        )
 
     def propose(
         self,
@@ -110,13 +150,7 @@ class HardPairSplitter:
         num_bits: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
 
-        tiny = torch.finfo(probabilities.dtype).tiny
-
-        cross_entropy = (
-            -probabilities.gather(1, Y[:, None]).squeeze(1).clamp_min(tiny).log()
-        )
-
-        order = torch.argsort(cross_entropy, descending=True)
+        order = self.order(probabilities, Y)
 
         # the pairing loop is inherently sequential, but runs only a couple of
         # dozen iterations; this is the one host sync per batch and costs <1%
@@ -141,3 +175,7 @@ class HardPairSplitter:
         b = X[pair_indices[:, 1], feature_indices]
 
         return feature_indices, (a + b) / 2
+
+    def __repr__(self) -> str:
+
+        return f"HardPairSplitter(sample={self.sample})"
