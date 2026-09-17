@@ -155,9 +155,10 @@ def load_split(
 
 # == variants ==================================================================
 
-# Each entry is kwargs for HashBoost, plus three keys the runner consumes
+# Each entry is kwargs for HashBoost, plus four keys the runner consumes
 # itself: "estimators" (how many to bag), "overrides" (per-estimator kwarg
-# patches) and "readout" (kwargs for a post-fit `fit_readout`).
+# patches), "readout" (kwargs for a post-fit `fit_readout`) and
+# "active_epochs" (the frozen-round window, converted to `active_rounds`).
 # Notes record what screening already measured, so results stay comparable.
 VARIANTS: dict[str, dict[str, Any]] = {
     "baseline": {},
@@ -312,6 +313,14 @@ VARIANTS: dict[str, dict[str, Any]] = {
     # them on hard examples but spreads them. The splitter holds no per-round
     # state, so one instance is safe to share across seeds and estimators.
     "sampled_pairs": {"splitter": HardPairSplitter(sample=True)},
+    # -- frozen rounds --------------------------------------------------------
+    # Only the newest `active_epochs` epochs' worth of rounds keep
+    # accumulating; each row's frozen rounds are summed once and cached, so a
+    # batch's cost stops growing with the model. The window is in epochs, not
+    # rounds, so that one variant means the same thing on every dataset.
+    "frozen_2ep": {"active_epochs": 2},
+    "frozen_10ep": {"active_epochs": 10},
+    "frozen_10ep_capacity_2": {"active_epochs": 10, "hashes_per_round": 2},
 }
 
 
@@ -343,8 +352,12 @@ def run_once(
     estimators = config.pop("estimators", None)
     overrides = config.pop("overrides", None)
     readout = config.pop("readout", None)
+    active_epochs = config.pop("active_epochs", None)
 
     per_batch = config.get("hashes_per_round", 1)
+
+    if active_epochs is not None:
+        config["active_rounds"] = active_epochs * len(split.batches) * per_batch
 
     kwargs: dict[str, Any] = dict(
         num_classes=split.num_classes,
@@ -362,6 +375,16 @@ def run_once(
         else HashBoost(**kwargs)
     )
 
+    # Stable row ids, so a model with frozen rounds can cache them per row
+    # (ignored otherwise). The batches are fixed, so each is one contiguous
+    # range of ids. Kept on the host, where `fit_batch` reads them without
+    # waiting on the GPU.
+    starts = np.cumsum([0] + [Y.shape[0] for _, Y in split.batches])
+    rows = [
+        np.arange(start, start + Y.shape[0])
+        for start, (_, Y) in zip(starts, split.batches)
+    ]
+
     if device.startswith("cuda"):
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
@@ -372,8 +395,8 @@ def run_once(
     curve_y: list[float] = []
 
     for epoch in range(epochs):
-        for X, Y in split.batches:
-            model.fit_batch(X, Y)
+        for (X, Y), batch_rows in zip(split.batches, rows):
+            model.fit_batch(X, Y, rows=batch_rows)
 
         if (epoch + 1) % eval_every == 0 or epoch == epochs - 1:
             curve_x.append(model.num_rounds)

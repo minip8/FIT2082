@@ -952,3 +952,148 @@ def test_readout_spans_a_heterogeneous_ensemble(device):
     assert readout.weights.shape[1] == 2**6
 
     assert torch.isfinite(readout.predict(X)).all()
+
+
+# == frozen rounds =============================================================
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_frozen_rounds_stop_updating(device):
+    """Outside the active window a round keeps exactly what it had.
+
+    With a window of 3, the batch that creates round r updates rounds r-2..r,
+    so once 5 rounds exist rounds 0-2 have had their last update and round 3
+    has not. Checking both sides of that edge pins the window's exact size.
+    """
+
+    X, Y, k = _data()
+    make = _random_splitter(10, X.shape[1], device)
+
+    model = HashBoost(
+        num_classes=k,
+        max_num_hashes=10,
+        device=device,
+        active_rounds=3,
+        splitter=make(),
+    )
+
+    for _ in range(5):
+        model.fit_batch(X, Y)
+
+    stats = model.tables.stats[:5].clone()
+    logits = model.tables.logits[:3].clone()
+
+    for _ in range(5):
+        model.fit_batch(X, Y)
+
+    assert torch.equal(model.tables.stats[:3], stats[:3])
+    assert torch.equal(model.tables.logits[:3], logits)
+
+    # every accumulation adds a positive hessian, so an update always shows
+    assert not torch.equal(model.tables.stats[3], stats[3])
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("hashes_per_round", [1, 2])
+def test_frozen_cache_matches_rereading_frozen_rounds(device, hashes_per_round):
+    """Caching per row reorders the arithmetic and must not change the result.
+
+    Each epoch draws its batches from a fresh permutation, so rows arrive
+    having last been seen at different times and disagree on how many rounds
+    they have cached -- the case the per-row mask exists for. Row ids are
+    sparse and large, so the cache also has to grow, and `round_chunk=5` makes
+    every fold and gather span several chunks.
+    """
+
+    n, batch, epochs, window = 240, 60, 6, 7
+    X, Y, k = _data(n=n)
+    rounds = epochs * (n // batch) * hashes_per_round
+    make = _random_splitter(rounds, X.shape[1], device)
+
+    def build():
+        return HashBoost(
+            num_classes=k,
+            max_num_hashes=rounds,
+            hashes_per_round=hashes_per_round,
+            device=device,
+            round_chunk=5,
+            active_rounds=window,
+            splitter=make(),
+        )
+
+    cached = build()
+    reread = build()
+
+    rng = np.random.default_rng(0)
+
+    for _ in range(epochs):
+        order = rng.permutation(n)
+
+        for start in range(0, n, batch):
+            rows = order[start : start + batch]
+
+            cached.fit_batch(X[rows], Y[rows], rows=rows * 1000 + 7)
+            reread.fit_batch(X[rows], Y[rows])
+
+    # the cache was really exercised, not bypassed
+    assert cached._frozen_upto is not None
+    assert int(cached._frozen_upto.max()) > 0
+
+    assert torch.allclose(cached.tables.logits, reread.tables.logits, atol=1e-5)
+    assert torch.allclose(cached.predict(X), reread.predict(X), atol=1e-4, rtol=1e-4)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_bagging_hands_rows_to_every_estimator(device):
+
+    X, Y, k = _data()
+    rows = np.arange(X.shape[0])
+
+    # one replay sequence per model, shared by its two estimators
+    make = _random_splitter(2 * 12, X.shape[1], device)
+
+    def build():
+        return BaggedHashBoost(
+            num_estimators=2,
+            num_classes=k,
+            max_num_hashes=12,
+            device=device,
+            active_rounds=4,
+            splitter=make(),
+        )
+
+    cached = build()
+    reread = build()
+
+    for _ in range(12):
+        cached.fit_batch(X, Y, rows=rows)
+        reread.fit_batch(X, Y)
+
+    assert all(e._frozen_upto is not None for e in cached.estimators)
+    assert torch.allclose(
+        cached.predict_proba(X), reread.predict_proba(X), atol=1e-5, rtol=1e-5
+    )
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_frozen_rounds_validate_and_reset(device):
+
+    X, Y, k = _data()
+
+    with pytest.raises(ValueError, match="active_rounds"):
+        HashBoost(num_classes=k, device=device, active_rounds=0)
+
+    model = HashBoost(num_classes=k, max_num_hashes=8, device=device, active_rounds=2)
+
+    with pytest.raises(ValueError, match="row ids"):
+        model.fit_batch(X, Y, rows=np.arange(3))
+
+    for _ in range(4):
+        model.fit_batch(X, Y, rows=np.arange(X.shape[0]))
+
+    assert model._frozen_upto is not None
+
+    # sums over the old tables' rounds must not survive a load
+    model.load_state_dict(model.state_dict())
+
+    assert model._frozen_upto is None and model._frozen_logits is None

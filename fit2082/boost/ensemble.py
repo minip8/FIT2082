@@ -82,10 +82,17 @@ class BaggedHashBoost:
 
         return self.estimators[0].device
 
-    def fit_batch(self, X: Array, Y: Array) -> "BaggedHashBoost":
+    def fit_batch(
+        self, X: Array, Y: Array, rows: Array | None = None
+    ) -> "BaggedHashBoost":
+        """Fit every estimator on the batch; `rows` as in `HashBoost.fit_batch`.
+
+        Each estimator keeps its own frozen-round cache, since each has its own
+        tables.
+        """
 
         for estimator in self.estimators:
-            estimator.fit_batch(X, Y)
+            estimator.fit_batch(X, Y, rows)
 
         return self
 

@@ -90,8 +90,18 @@ class HashTables:
 
     # -- predict ---------------------------------------------------------------
 
-    def predict_from_codes(self, codes: torch.Tensor, num_rounds: int) -> torch.Tensor:
-        """Sum one table row per round -> (n, k) logits."""
+    def predict_from_codes(
+        self,
+        codes: torch.Tensor,
+        num_rounds: int,
+        lo: int = 0,
+        skip_below: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Sum one table row per round over rounds [lo, num_rounds) -> (n, k).
+
+        `codes[0]` holds round `lo`. `skip_below`, if given, is (n,) per
+        example: example i leaves out every round below `skip_below[i]`.
+        """
 
         n = codes.shape[1]
         chunk = self.round_chunk(n)
@@ -100,14 +110,25 @@ class HashTables:
             (n, self.num_classes), dtype=torch.float32, device=self.device
         )
 
-        for a in range(0, num_rounds, chunk):
+        for a in range(lo, num_rounds, chunk):
             b = min(a + chunk, num_rounds)
 
             # chunk-local offsets: the table slice below is re-based to 0
-            flat = (codes[a:b].t().to(torch.int64) + self.offsets[: b - a]).contiguous()
+            flat = (
+                codes[a - lo : b - lo].t().to(torch.int64) + self.offsets[: b - a]
+            ).contiguous()
+
+            weights = None
+
+            if skip_below is not None:
+                rounds = torch.arange(a, b, device=self.device)
+                weights = (rounds[None, :] >= skip_below[:, None]).to(torch.float32)
 
             out += F.embedding_bag(
-                flat, self.logits[a:b].reshape(-1, self.num_classes), mode="sum"
+                flat,
+                self.logits[a:b].reshape(-1, self.num_classes),
+                mode="sum",
+                per_sample_weights=weights,
             )
 
         return out
@@ -115,14 +136,21 @@ class HashTables:
     # -- accumulate ------------------------------------------------------------
 
     def accumulate(
-        self, codes: torch.Tensor, num_rounds: int, updates: torch.Tensor
+        self,
+        codes: torch.Tensor,
+        num_rounds: int,
+        updates: torch.Tensor,
+        lo: int = 0,
     ) -> None:
-        """Scatter-add `updates` (n, 2k) into each round's bucket for each example."""
+        """Scatter-add `updates` (n, 2k) into each example's bucket, per round.
+
+        Covers rounds [lo, num_rounds); `codes[0]` holds round `lo`.
+        """
 
         n, width = updates.shape
         chunk = self.round_chunk(n)
 
-        for a in range(0, num_rounds, chunk):
+        for a in range(lo, num_rounds, chunk):
             b = min(a + chunk, num_rounds)
 
             # Every round scatters the *same* per-example values, just to
@@ -131,14 +159,16 @@ class HashTables:
             # is ever copied out to (chunk, n, 2k). Tiling the source with
             # `updates.repeat(chunk, 1)` and scattering into the flattened
             # buffer did copy it, and was 1.6-2.4x slower for that.
-            index = codes[a:b, :, None].to(torch.int64).expand(-1, -1, width)
+            index = (
+                codes[a - lo : b - lo, :, None].to(torch.int64).expand(-1, -1, width)
+            )
 
             self.stats[a:b].scatter_add_(1, index, updates.expand(b - a, -1, -1))
 
     # -- refresh ---------------------------------------------------------------
 
-    def refresh_logits(self, num_rounds: int) -> None:
-        """Recompute leaf values from the numerator/denominator buffers.
+    def refresh_logits(self, num_rounds: int, lo: int = 0) -> None:
+        """Recompute leaf values of rounds [lo, num_rounds) from their buffers.
 
         Every bucket is refreshed, not just the ones this batch touched: an
         untouched bucket's numerator and denominator are unchanged, so it lands
@@ -175,16 +205,16 @@ class HashTables:
             # `numerator / (denominator + eps) * lr`, so bit-identical to it,
             # but written straight into the logits: that form allocated two
             # table-sized temporaries per hash.
-            out = self.logits[:num_rounds]
+            out = self.logits[lo:num_rounds]
 
-            torch.add(self.stats[:num_rounds, :, k:], self.hessian_eps, out=out)
-            torch.div(self.stats[:num_rounds, :, :k], out, out=out)
+            torch.add(self.stats[lo:num_rounds, :, k:], self.hessian_eps, out=out)
+            torch.div(self.stats[lo:num_rounds, :, :k], out, out=out)
             out.mul_(self.lr)
 
             return
 
         # chunked over rounds: the pooled copy is the same size as the slice
-        for a in range(0, num_rounds, self._refresh_chunk):
+        for a in range(lo, num_rounds, self._refresh_chunk):
             b = min(a + self._refresh_chunk, num_rounds)
 
             block = self.stats[a:b]
