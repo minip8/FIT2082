@@ -319,8 +319,14 @@ def run_once(
     seed: int,
     eval_every: int,
     device: str,
+    compile: bool = False,
 ) -> dict[str, Any]:
-    """Train one variant with one seed."""
+    """Train one variant with one seed.
+
+    `compile` is a speed knob, not part of any variant: it fuses the hash
+    encoding and leaves every result unchanged. Compilation happens inside the
+    first `fit_batch`, so it is charged to the first seed's wall time.
+    """
 
     config = dict(config)
     estimators = config.pop("estimators", None)
@@ -333,6 +339,7 @@ def run_once(
         num_classes=split.num_classes,
         max_num_hashes=epochs * len(split.batches) * per_batch + 1,
         device=device,
+        compile=compile,
         **config,
     )
 
@@ -427,10 +434,11 @@ def run_variant(
     seeds: int,
     eval_every: int,
     device: str,
+    compile: bool = False,
 ) -> dict[str, Any]:
 
     runs = [
-        run_once(split, config, epochs, seed, eval_every, device)
+        run_once(split, config, epochs, seed, eval_every, device, compile)
         for seed in range(seeds)
     ]
 
@@ -482,6 +490,11 @@ def main() -> None:
     parser.add_argument("--num-train", type=int, default=32768 * 2)
     parser.add_argument("--out", default="results")
     parser.add_argument("--list", action="store_true")
+    parser.add_argument(
+        "--compile",
+        action="store_true",
+        help="torch.compile the hash encoding: faster, identical results",
+    )
     parser.add_argument(
         "--device", default="cuda" if torch.cuda.is_available() else "cpu"
     )
@@ -536,6 +549,7 @@ def main() -> None:
                     "commit": commit_hash(),
                     "dataset": args.dataset,
                     "device": args.device,
+                    "compile": args.compile,
                     "split": split.meta,
                     "epochs": args.epochs,
                     "seeds": args.seeds,
@@ -557,6 +571,7 @@ def main() -> None:
             args.seeds,
             args.eval_every,
             args.device,
+            args.compile,
         )
         models[name] = entry
         write()

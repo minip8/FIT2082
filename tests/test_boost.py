@@ -14,6 +14,7 @@ import pytest
 import torch
 
 from fit2082.boost import (
+    AxisAlignedPartitioner,
     BaggedHashBoost,
     HashBoost,
     HashTables,
@@ -21,6 +22,7 @@ from fit2082.boost import (
     Readout,
     fit_readout,
 )
+from fit2082.boost.partition import code_dtype
 from fit2082.boost.readout import RUNGS
 from fit2082.demo.boost import NewHashBoost, _predict_multi0
 
@@ -184,6 +186,126 @@ def test_device_parity():
     assert torch.allclose(
         on_cpu.predict(X), on_gpu.predict(X).cpu(), atol=1e-4, rtol=1e-4
     )
+
+
+def _partitioners(num_bits, num_hashes, num_features, device, seed=0, **kwargs):
+    """An axis-aligned and an oblique partitioner holding random splits."""
+
+    rng = np.random.default_rng(seed)
+    shape = (num_hashes, num_bits)
+
+    def ints():
+        return torch.as_tensor(rng.integers(0, num_features, shape), device=device)
+
+    def floats():
+        return torch.as_tensor(
+            rng.standard_normal(shape, dtype=np.float32), device=device
+        )
+
+    axis = AxisAlignedPartitioner(
+        num_bits=num_bits,
+        max_num_hashes=num_hashes,
+        device=torch.device(device),
+        **kwargs,
+    )
+    axis.feature_indices[:] = ints()
+    axis.midpoints[:] = floats()
+
+    oblique = ObliquePartitioner(
+        num_bits=num_bits,
+        max_num_hashes=num_hashes,
+        device=torch.device(device),
+        **kwargs,
+    )
+    oblique.left[:] = ints()
+    oblique.right[:] = ints()
+    oblique.midpoints[:] = floats()
+
+    return axis, oblique
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("num_bits", [4, 8, 9, 15, 16])
+def test_codes_are_narrow_and_match_the_direct_encoding(device, num_bits):
+    """Bit-at-a-time codes must equal the obvious weighted sum of the bits.
+
+    The widths sit either side of each dtype boundary: 8 is the widest uint8
+    code and 15 the widest int16 one, since a sixteenth bit would be int16's
+    sign. `encode_chunk=2` over five hashes also exercises a short tail chunk.
+    """
+
+    X, _, _ = _data(n=300, p=12)
+    Xt = torch.as_tensor(X, device=device).t().contiguous()
+
+    axis, oblique = _partitioners(num_bits, 5, 12, device, encode_chunk=2)
+
+    weights = 2 ** torch.arange(num_bits, device=device)
+
+    def direct(bits):
+        return (bits.to(torch.int64) * weights[None, :, None]).sum(1)
+
+    expected = {
+        axis: direct(Xt[axis.feature_indices] <= axis.midpoints[:, :, None]),
+        oblique: direct(
+            (Xt[oblique.left] - Xt[oblique.right]) <= oblique.midpoints[:, :, None]
+        ),
+    }
+
+    for partitioner, codes in expected.items():
+        # split across two calls, so a range starting past zero is covered
+        actual = torch.cat([partitioner.encode(Xt, 0, 2), partitioner.encode(Xt, 2, 5)])
+
+        assert actual.dtype == code_dtype(num_bits)
+        assert torch.equal(actual.to(torch.int64), codes)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="compiles through triton")
+def test_compiled_encoding_matches_eager():
+
+    X, _, _ = _data(n=1024, p=32)
+    Xt = torch.as_tensor(X, device="cuda").t().contiguous()
+
+    eager = _partitioners(8, 40, 32, "cuda", seed=1)
+    compiled = _partitioners(8, 40, 32, "cuda", seed=1, compile=True)
+
+    for a, b in zip(eager, compiled, strict=True):
+        assert torch.equal(a.encode(Xt, 0, 40), b.encode(Xt, 0, 40))
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("round_chunk", [None, 3])
+def test_accumulate_matches_a_round_by_round_index_add(device, round_chunk):
+    """The expanded-view scatter is one index_add_ per round, batched.
+
+    Seven rounds in chunks of three leaves a tail chunk of one.
+    """
+
+    rng = np.random.default_rng(0)
+    rounds, n, k, num_bits = 7, 200, 3, 4
+
+    tables = HashTables(
+        num_classes=k,
+        num_bits=num_bits,
+        max_num_hashes=rounds,
+        lr=0.1,
+        device=torch.device(device),
+        round_chunk=round_chunk,
+    )
+
+    codes = torch.as_tensor(
+        rng.integers(0, 2**num_bits, (rounds, n)).astype(np.uint8), device=device
+    )
+    updates = torch.as_tensor(
+        rng.standard_normal((n, 2 * k), dtype=np.float32), device=device
+    )
+
+    tables.accumulate(codes, rounds, updates)
+
+    expected = torch.zeros_like(tables.stats)
+    for r in range(rounds):
+        expected[r].index_add_(0, codes[r].to(torch.int64), updates)
+
+    assert torch.allclose(tables.stats, expected, atol=1e-5)
 
 
 @pytest.mark.parametrize("device", DEVICES)

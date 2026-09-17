@@ -8,7 +8,7 @@ import numpy.typing as npt
 import torch
 
 from fit2082.boost.objective import Objective, SoftmaxObjective
-from fit2082.boost.partition import AxisAlignedPartitioner, Partitioner
+from fit2082.boost.partition import AxisAlignedPartitioner, Partitioner, code_dtype
 from fit2082.boost.splits import HardPairSplitter, Splitter
 from fit2082.boost.tables import HashTables
 
@@ -133,10 +133,19 @@ class HashBoost:
         # feature-major, so each round's comparisons read contiguous memory
         Xt = Xd.t().contiguous()
 
+        r0 = self.num_rounds
+
         # Existing rounds' split points are fixed for the whole batch, so their
-        # codes are encoded once and extended by one column per added hash --
-        # rather than re-encoding every round for each hash.
-        codes = None
+        # codes are encoded once, into a buffer with room for every hash this
+        # batch adds -- rather than re-encoded, or re-concatenated, per hash.
+        codes = torch.empty(
+            (r0 + self.hashes_per_round, Xd.shape[0]),
+            dtype=code_dtype(self.num_bits),
+            device=self.device,
+        )
+
+        if r0:
+            codes[:r0] = self.partitioner.encode(Xt, 0, r0)
 
         for _ in range(self.hashes_per_round):
             if self.num_rounds >= self.max_num_hashes:
@@ -148,10 +157,7 @@ class HashBoost:
             r = self.num_rounds
 
             if r:
-                if codes is None:
-                    codes = self.partitioner.encode(Xt, 0, r)
-
-                logits = self.tables.predict_from_codes(codes, r)
+                logits = self.tables.predict_from_codes(codes[:r], r)
             else:
                 logits = torch.zeros(
                     (Xd.shape[0], self.num_classes),
@@ -165,10 +171,11 @@ class HashBoost:
             self.partitioner.propose(r, Xd, Yd, probabilities, gradient, hessian)
 
             # the new round is just round r: update it in the same scatter
-            new_codes = self.partitioner.encode(Xt, r, r + 1)
-            codes = new_codes if codes is None else torch.cat([codes, new_codes], 0)
+            codes[r : r + 1] = self.partitioner.encode(Xt, r, r + 1)
 
-            self.tables.accumulate(codes, r + 1, torch.cat([-gradient, hessian], -1))
+            self.tables.accumulate(
+                codes[: r + 1], r + 1, torch.cat([-gradient, hessian], -1)
+            )
             self.tables.refresh_logits(r + 1)
 
             self.num_rounds = r + 1

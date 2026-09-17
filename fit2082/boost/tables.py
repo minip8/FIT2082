@@ -9,8 +9,9 @@ Layout notes (these are load-bearing -- see the comments at each use site):
   `Partitioner` (`fit2082.boost.partition`), which owns the split parameters.
 * `stats` fuses the residual numerator and hessian denominator into one tensor
   so a single scatter updates both.
-* Prediction indexes a re-based table slice and so uses **chunk-local** offsets;
-  accumulation scatters into the full buffer and so uses **global** offsets.
+* Prediction indexes a re-based, flattened table slice and so uses
+  **chunk-local** offsets; accumulation scatters along each round's own bucket
+  axis and so needs no offsets at all.
 """
 
 import torch
@@ -56,7 +57,7 @@ class HashTables:
 
         # stats[..., :k] is the accumulated *negated* residual (the numerator);
         # stats[..., k:] is the accumulated hessian (the denominator). Keeping
-        # them adjacent lets one index_add_ update both, and keeping numerator
+        # them adjacent lets one scatter update both, and keeping numerator
         # and denominator separately means the leaf value is always exact.
         self.stats = torch.zeros((m, s, 2 * k), dtype=torch.float32, device=device)
         self.logits = torch.zeros((m, s, k), dtype=torch.float32, device=device)
@@ -74,9 +75,10 @@ class HashTables:
     def round_chunk(self, num_examples: int) -> int:
         """How many rounds to process per kernel.
 
-        Bounds the size of the tiled scatter source, which is the largest
-        intermediate. Too small and per-launch overhead dominates; too large and
-        the allocator starts thrashing.
+        Bounds the largest per-chunk intermediate, the (chunk, n, k) floats that
+        `gather_contributions` returns, with room to spare. Too small and
+        per-launch overhead dominates; too large and the allocator starts
+        thrashing.
         """
 
         if self._round_chunk is not None:
@@ -117,25 +119,21 @@ class HashTables:
     ) -> None:
         """Scatter-add `updates` (n, 2k) into each round's bucket for each example."""
 
-        n = updates.shape[0]
+        n, width = updates.shape
         chunk = self.round_chunk(n)
-
-        # Every chunk scatters the *same* per-example values, just to different
-        # buckets, so the tiled source is built once and reused. Round-major
-        # codes make row j*n + i correspond to (round a+j, example i), which is
-        # exactly `updates.repeat(chunk, 1)` -- and lets a short tail chunk take
-        # a prefix slice. (With example-major codes that slice is silently wrong.)
-        tiled = updates.repeat(chunk, 1)
-
-        stats = self.stats.view(-1, 2 * self.num_classes)
 
         for a in range(0, num_rounds, chunk):
             b = min(a + chunk, num_rounds)
 
-            # global offsets: scattering into the full buffer
-            flat = (codes[a:b].to(torch.int64) + self.offsets[a:b, None]).reshape(-1)
+            # Every round scatters the *same* per-example values, just to
+            # different buckets. `expand` lends that one (n, 2k) block to each
+            # round in the chunk as a view, so neither the index nor the source
+            # is ever copied out to (chunk, n, 2k). Tiling the source with
+            # `updates.repeat(chunk, 1)` and scattering into the flattened
+            # buffer did copy it, and was 1.6-2.4x slower for that.
+            index = codes[a:b, :, None].to(torch.int64).expand(-1, -1, width)
 
-            stats.index_add_(0, flat, tiled[: (b - a) * n])
+            self.stats[a:b].scatter_add_(1, index, updates.expand(b - a, -1, -1))
 
     # -- refresh ---------------------------------------------------------------
 
@@ -173,12 +171,15 @@ class HashTables:
         k = self.num_classes
 
         if not (self.neighbour_shrinkage or self.shrinkage_tau):
-            numerator = self.stats[:num_rounds, :, :k]
-            denominator = self.stats[:num_rounds, :, k:]
+            # The same three operations in the same order as
+            # `numerator / (denominator + eps) * lr`, so bit-identical to it,
+            # but written straight into the logits: that form allocated two
+            # table-sized temporaries per hash.
+            out = self.logits[:num_rounds]
 
-            self.logits[:num_rounds] = (
-                numerator / (denominator + self.hessian_eps) * self.lr
-            )
+            torch.add(self.stats[:num_rounds, :, k:], self.hessian_eps, out=out)
+            torch.div(self.stats[:num_rounds, :, :k], out, out=out)
+            out.mul_(self.lr)
 
             return
 
