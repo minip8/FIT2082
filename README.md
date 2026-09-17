@@ -7,6 +7,7 @@
 A profile of `fit_batch`, three changes it led to, and a screen of about 30
 variants on up to five datasets. Pedestrian + QUANT through `experiment.py`
 unless stated; every comparison is against a baseline rerun in the same sweep.
+`notebooks/screen.ipynb` plots the sweeps and streamed runs made at `157e54d`.
 
     uv run python -m fit2082.boost.experiment --seeds 3 --compile \
         --variants baseline,capacity_2
@@ -14,6 +15,8 @@ unless stated; every comparison is against a baseline rerun in the same sweep.
         --variants baseline,sampled_pairs
     uv run python -m fit2082.boost.experiment --seeds 3 --compile \
         --variants baseline,frozen_2ep,frozen_10ep,capacity_2,frozen_10ep_capacity_2
+    uv run python scripts/stream_full.py --dataset Traffic --epochs 10 --compile \
+        --active-epochs 2 --label hashboost_frozen_2ep
 
 #### Where the time goes
 
@@ -31,11 +34,11 @@ Share of one batch, measured stage by stage with synchronisation between stages:
 | objective + propose | 4% | 9% | 7% |
 
 Many classes make the scatter dominate; many features make the encoding
-dominate. For the streamed runs neither matters much: a LenDB batch spends 5-18
-ms in `fit_batch` against 246 ms in QUANT and 64 ms (warm, sorted) to 1.8 s
-(cold) reading the memmap. QUANT makes 120 separate quantile calls per
-representation over only 9-11 distinct interval lengths, so batching intervals
-by length is the obvious next step there.
+dominate. For the streamed runs neither matters much: over the 1,195-round
+LenDB streams below, a batch averaged 11 ms in `fit_batch` against 172 ms in
+QUANT and 125 ms reading the memmap. QUANT makes 120 separate quantile calls
+per representation over only 9-11 distinct interval lengths, so batching
+intervals by length is the obvious next step there.
 
 #### Exact kernels: ~1.5x, identical results (cf658bc)
 
@@ -56,7 +59,7 @@ by length is the obvious next step there.
 `--compile` stays opt-in: it costs ~5.5 s on first use and ~1.5 s with a warm
 inductor cache, charged to the first seed.
 
-#### Sampled hard pairs: a small, consistent win on Pedestrian (1a2297c)
+#### Sampled hard pairs: a small gain that keeps its sign (1a2297c)
 
 `HardPairSplitter(sample=True)` draws the pair examples in proportion to cross
 entropy (Gumbel-top-k) instead of taking the hardest first. The strict ranking
@@ -68,9 +71,11 @@ comes round -- once memorised, its persistent outliers.
 | Pedestrian | 5 | 0.2273 +- 0.0019 | **0.2220 +- 0.0034** |
 | InsectSound | 5 | 0.2696 +- 0.0056 | 0.2643 +- 0.0034 |
 
-This is the third Pedestrian sweep to show it: two screening sweeps read
--0.005 and -0.006. Screening on Tiselac, Traffic and LenDB (3 seeds) read
--0.001, 0.000 and 0.000 -- small where it helps, and it hurt nowhere it was tried.
+Two screening sweeps before this one read -0.005 and -0.006 on Pedestrian, and
+the sweep at `157e54d` read -0.001 there and -0.008 on InsectSound. Four
+Pedestrian sweeps agree on the sign and not on the size, so read it as a small
+gain rather than a settled number. Screening on Tiselac, Traffic and LenDB (3
+seeds) read -0.001, 0.000 and 0.000, and it hurt nowhere it was tried.
 
 #### Frozen rounds: capacity_2's accuracy in 2.4x less time (d39acad)
 
@@ -88,15 +93,51 @@ every dataset. 3 seeds, compiled:
 | `capacity_2` | 0.2133 +- 0.0025 | 25.6s |
 | **`frozen_10ep_capacity_2`** | **0.2135 +- 0.0032** | **10.8s** |
 
+The sweep at `157e54d` repeats it: `frozen_10ep_capacity_2` at 0.2129 in
+10.3 s against `capacity_2` at 0.2137 in 24.7 s.
+
 The window is a real hyperparameter. On Pedestrian a 2-epoch window cost
-+0.008 here and +0.023 and +0.027 in two earlier sweeps; a 10-epoch window
-cost +0.002 to +0.004. On InsectSound even 2 epochs cost nothing measurable
++0.008, +0.013, +0.023 and +0.027 across four sweeps; a 10-epoch window cost
++0.001 to +0.004. On InsectSound even 2 epochs cost nothing measurable
 (0.2726 +- 0.0085 against 0.2703 +- 0.0059, 5 seeds). The saving grows with
-the number of rounds: InsectSound's 400-round runs are no faster.
+the number of rounds: InsectSound's 400-round runs are barely faster.
 
 Practical: pass row ids from the host. The first version read the per-row
 state back off the GPU, and those two synchronisations per batch made caching
 slower (4.8 s) than freezing without it (4.1 s).
+
+#### Frozen rounds in a streamed run (157e54d)
+
+`stream_full.py --active-epochs` freezes the same way over a whole training
+pool, keyed by each row's index into the .npy, and now records synchronised
+stage times at every evaluation. Single runs each; validation error is the mean
+of the last seven evaluations, because on 4,096 rows consecutive evaluations
+differ by as much as 0.01:
+
+| stream | window | val error | `fit_batch` | QUANT | read | wall |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Traffic, 10 epochs, 1,160,582 rows | none | 0.3922 | 29s | 121s | 2s | 154s |
+| | 2 epochs | 0.3877 | 20s | 114s | 2s | 139s |
+| | 1 epoch | 0.4052 | 21s | 125s | 2s | 151s |
+| LenDB, 5 epochs, 975,291 rows | none | 0.0745 | 13s | 206s | 149s | 370s |
+| | 2 epochs | 0.0751 | 14s | 206s | 147s | 368s |
+| | 1 epoch | 0.0698 | 13s | 208s | 148s | 371s |
+
+* **A 2-epoch window cost nothing measurable on either pool.** A 1-epoch window
+  trailed by 0.013 on Traffic, the one gap bigger than the noise and a single
+  run, so a lead rather than a result.
+* **Freezing flattens the model's cost per batch.** Unfrozen, Traffic's grows
+  linearly, 2 ms to 14.5 ms over 2,840 rounds; frozen, it settles near 7.5 ms.
+  LenDB's ~7 ms of fixed per-batch work (14,940 columns to transpose and
+  encode) swamps the growth over 1,195 rounds.
+* **But in a streamed run the model is the smaller part:** 14-19% of Traffic's
+  wall time and under 4% of LenDB's. The 29 s to 20 s that freezing saved on
+  Traffic is smaller than QUANT's own spread across the three runs (114-125 s).
+  Extrapolating Traffic's slope, the unfrozen model would only match the 42 ms
+  per batch of reading plus QUANT at around 11,000 rounds.
+* **The whole Traffic pool pays.** On the same validation rows HashBoost scored
+  0.4404 from 65,536 training rows, and XGBoost and LightGBM 0.3997 and 0.3950;
+  ten streamed epochs over all 1,160,582 rows are level with the tree models.
 
 #### Also measured, with prototype code not in the repo
 
