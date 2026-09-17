@@ -2,6 +2,155 @@
 
 ## Benchmarks
 
+### hashboost-screen
+
+A profile of `fit_batch`, three changes it led to, and a screen of about 30
+variants on up to five datasets. Pedestrian + QUANT through `experiment.py`
+unless stated; every comparison is against a baseline rerun in the same sweep.
+
+    uv run python -m fit2082.boost.experiment --seeds 3 --compile \
+        --variants baseline,capacity_2
+    uv run python -m fit2082.boost.experiment --seeds 5 --compile \
+        --variants baseline,sampled_pairs
+    uv run python -m fit2082.boost.experiment --seeds 3 --compile \
+        --variants baseline,frozen_2ep,frozen_10ep,capacity_2,frozen_10ep_capacity_2
+
+#### Where the time goes
+
+Share of one batch, measured stage by stage with synchronisation between stages:
+
+| stage | Pedestrian | InsectSound | LenDB |
+| --- | ---: | ---: | ---: |
+| features / classes | 212 / 82 | 5,470 / 10 | 14,940 / 2 |
+| ms per batch (at rounds) | 27.9 (800) | 13.5 (800) | 18.3 (1,200) |
+| accumulate | 57% | 21% | 8% |
+| encode | 19% | 43% | 47% |
+| predict | 10% | 11% | 10% |
+| refresh | 10% | 3% | 1% |
+| transpose | 1% | 14% | 28% |
+| objective + propose | 4% | 9% | 7% |
+
+Many classes make the scatter dominate; many features make the encoding
+dominate. For the streamed runs neither matters much: a LenDB batch spends 5-18
+ms in `fit_batch` against 246 ms in QUANT and 64 ms (warm, sorted) to 1.8 s
+(cold) reading the memmap. QUANT makes 120 separate quantile calls per
+representation over only 9-11 distinct interval lengths, so batching intervals
+by length is the obvious next step there.
+
+#### Exact kernels: ~1.5x, identical results (cf658bc)
+
+| variant | before | eager | `--compile` | peak GPU |
+| --- | ---: | ---: | ---: | ---: |
+| `baseline` | 11.4s | 8.9s | ~7.5s | 428 -> 284 MB |
+| `capacity_2` | 38.5s | 26.7s | 24.9s | 771 -> 491 MB |
+
+* **Encode** built `(chunk, bits, n)` floats plus two int32 copies to weight
+  and sum, where the answer is one byte per `(round, example)`. It now ORs one
+  bit at a time into a uint8 code: 2-3.5x faster eagerly, and `torch.compile`
+  can fuse each bit into a single kernel, 9-18x against the old one.
+* **Accumulate** tiled the `(n, 2k)` update over every round of a chunk with
+  `repeat` before scattering. `scatter_add_` over `expand`ed views takes the
+  same sums without the copy: 1.6-2.4x.
+* **Refresh** writes leaf values in place.
+
+`--compile` stays opt-in: it costs ~5.5 s on first use and ~1.5 s with a warm
+inductor cache, charged to the first seed.
+
+#### Sampled hard pairs: a small, consistent win on Pedestrian (1a2297c)
+
+`HardPairSplitter(sample=True)` draws the pair examples in proportion to cross
+entropy (Gumbel-top-k) instead of taking the hardest first. The strict ranking
+rebuilds every hash from the same dozen or so hardest rows each time a batch
+comes round -- once memorised, its persistent outliers.
+
+| dataset | seeds | baseline | `sampled_pairs` |
+| --- | ---: | ---: | ---: |
+| Pedestrian | 5 | 0.2273 +- 0.0019 | **0.2220 +- 0.0034** |
+| InsectSound | 5 | 0.2696 +- 0.0056 | 0.2643 +- 0.0034 |
+
+This is the third Pedestrian sweep to show it: two screening sweeps read
+-0.005 and -0.006. Screening on Tiselac, Traffic and LenDB (3 seeds) read
+-0.001, 0.000 and 0.000 -- small where it helps, and it hurt nowhere it was tried.
+
+#### Frozen rounds: capacity_2's accuracy in 2.4x less time (d39acad)
+
+`active_rounds` freezes every round older than a window, and `fit_batch(...,
+rows=...)` caches each row's frozen contribution, so a batch costs O(window +
+rounds frozen since the row was last seen) instead of O(rounds). In
+`experiment.py` the window is `active_epochs`, so a variant means the same on
+every dataset. 3 seeds, compiled:
+
+| variant | val error | wall |
+| --- | ---: | ---: |
+| `baseline` | 0.2252 +- 0.0023 | 8.4s |
+| `frozen_10ep` | 0.2276 +- 0.0037 | 3.6s |
+| `frozen_2ep` | 0.2332 +- 0.0042 | 1.8s |
+| `capacity_2` | 0.2133 +- 0.0025 | 25.6s |
+| **`frozen_10ep_capacity_2`** | **0.2135 +- 0.0032** | **10.8s** |
+
+The window is a real hyperparameter. On Pedestrian a 2-epoch window cost
++0.008 here and +0.023 and +0.027 in two earlier sweeps; a 10-epoch window
+cost +0.002 to +0.004. On InsectSound even 2 epochs cost nothing measurable
+(0.2726 +- 0.0085 against 0.2703 +- 0.0059, 5 seeds). The saving grows with
+the number of rounds: InsectSound's 400-round runs are no faster.
+
+Practical: pass row ids from the host. The first version read the per-row
+state back off the GPU, and those two synchronisations per batch made caching
+slower (4.8 s) than freezing without it (4.1 s).
+
+#### Also measured, with prototype code not in the repo
+
+These came from subclasses written for the screen and are not reproducible
+from this branch. Same-sweep baselines, 3-5 seeds.
+
+**Weighting feature draws by ANOVA F is dataset-specific.** Drawing features
+from `0.5 * uniform + 0.5 * F / sum(F)`, F computed on the training rows:
+
+| | InsectSound | Pedestrian | LenDB | Tiselac | Traffic |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| features | 5,470 | 212 | 14,940 | 2,040 | 212 |
+| change in val error | **-0.027** | -0.002 | +0.001 | +0.004 | **+0.011** |
+
+On InsectSound -- the largest gap to XGBoost -- error falls steadily with the
+F weight (0.265, 0.245, 0.238, 0.233, 0.229 at 0, 0.25, 0.5, 0.75, 1), F from a
+single batch keeps most of it (0.2415), and it stacks with `capacity_2` (0.2264)
+and bagging (0.2269 against `bagged_4`'s 0.2491). But it hurts Traffic, and
+restricting draws to the top quarter of features was catastrophic on Pedestrian
+(0.3420, train error 0.20). Dilution is not the general explanation: LenDB has
+the most features and did not move.
+
+**`hashes_per_round` counts each batch H times into existing rounds**, as
+`test_hashes_per_round_matches_repeated_fit_batch` already pins down. A variant
+adding two hashes per batch but updating old rounds once lost most of
+`capacity_2`'s Pedestrian gain -- 0.2301 +- 0.0125 against 0.2122 +- 0.0033,
+baseline 0.2252 -- while on InsectSound the two were equal (0.2492, 0.2516).
+So `cac8e0b`'s "more capacity, same data passes" is only part of the story.
+
+**Pedestrian and InsectSound sit in different regimes.** Halving the batch to
+2,048 (twice the rounds) cost +0.021 on Pedestrian and gained -0.015 on
+InsectSound. Pedestrian's 82 imbalanced classes make it limited by noisy leaf
+estimates -- fewer examples per round hurts, as early freezing and single
+updates also did -- while InsectSound is limited by capacity.
+
+**Leaf values are chaotic on Pedestrian**, which is part of why seeds do not
+control reruns (`3d25491`). Two models replaying identical hashes end up to 180
+logits apart, with 1.4% of validation predictions flipped. Under deterministic
+kernels a 1e-6 nudge to one round's statistics grows to 60 logits in 4 epochs.
+Extreme leaves are the amplifier: clipping leaves to +-3 holds the nudge at 1e-6,
+at no accuracy cost (5 seeds). They come from Newton steps the hessian floor
+dominates -- a bucket holding one rare-class example gets roughly
+`lr / (count * 1e-3)` -- and reach +-100. Same-seed reruns still diverge once
+split selection meets a floating-point near-tie, at round 393 instead of 53, so
+clipping alone does not shrink the noise floor. InsectSound showed no such
+amplification.
+
+**Dead ends.** Label smoothing (0.05 / 0.1: Pedestrian +0.007 / +0.033), a
+hessian floor of 1e-2 or 1e-4 (Pedestrian +0.006 / +0.098: 1e-3 is
+load-bearing), thresholds drawn uniformly between the pair, reshuffling batches
+every epoch, choosing among 4 candidate features the one that best separates
+the pair (-0.007 on InsectSound, dominated by F weighting; -0.001 on
+Pedestrian), and leaf clipping as an accuracy lever.
+
 ### streaming-baselines
 
 Streaming the whole LenDB training pool -- 975,291 rows -- through both models,
