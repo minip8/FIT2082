@@ -38,28 +38,57 @@ class Partitioner(Protocol):
         ...
 
     def encode(self, Xt: torch.Tensor, lo: int, hi: int) -> torch.Tensor:
-        """(p, n) feature-major X -> (hi - lo, n) int32 codes for hashes [lo, hi)."""
+        """(p, n) feature-major X -> (hi - lo, n) codes for hashes [lo, hi).
+
+        Any integer dtype wide enough for `num_bits` will do; the families here
+        return `code_dtype(num_bits)`.
+        """
         ...
+
+
+def code_dtype(num_bits: int) -> torch.dtype:
+    """The narrowest integer dtype that holds a `num_bits`-bit hash code.
+
+    Codes are only ever indices, widened to int64 a chunk at a time where they
+    are used, so storing them narrow is free: a batch's codes over 6,400 rounds
+    are 26 MB as uint8 against 105 MB as int32.
+    """
+
+    if num_bits <= 8:
+        return torch.uint8
+    if num_bits <= 15:
+        return torch.int16
+
+    return torch.int32
 
 
 # == axis-aligned ==============================================================
 
 
 def encode_axis_aligned(
-    Xt: torch.Tensor,
-    feature_indices: torch.Tensor,
-    midpoints: torch.Tensor,
-    weights: torch.Tensor,
+    Xt: torch.Tensor, feature_indices: torch.Tensor, midpoints: torch.Tensor
 ) -> torch.Tensor:
-    """(p, n) X + (c, B) splits -> (c, n) int32 codes.
+    """(p, n) X + (c, B) splits -> (c, n) codes, built one bit at a time.
 
-    Kept at module scope so it can be handed to `torch.compile`, which fuses the
-    gather, the comparison and the bit-packing into a single kernel.
+    The direct form -- `(Xt[feature_indices] <= midpoints[:, :, None])` weighted
+    by powers of two and summed over bits -- materialises (c, B, n) floats and
+    two (c, B, n) int32 copies before collapsing them, and was 2-3.5x slower
+    eagerly for it. Here the largest intermediate is one (c, n) gather.
+
+    Kept at module scope so it can be handed to `torch.compile`, which fuses
+    each bit's gather, comparison and shift into one kernel: another 4-5x.
     """
 
-    bits = Xt[feature_indices] <= midpoints[:, :, None]  # (c, B, n)
+    c, num_bits = feature_indices.shape
+    dtype = code_dtype(num_bits)
 
-    return (bits.to(torch.int32) * weights[None, :, None]).sum(1)
+    code = torch.zeros((c, Xt.shape[1]), dtype=dtype, device=Xt.device)
+
+    for bit in range(num_bits):
+        below = Xt[feature_indices[:, bit]] <= midpoints[:, bit, None]
+        code |= below.to(dtype) << bit
+
+    return code
 
 
 class AxisAlignedPartitioner:
@@ -89,8 +118,6 @@ class AxisAlignedPartitioner:
             (max_num_hashes, num_bits), dtype=torch.float32, device=device
         )
 
-        self.weights = (2 ** torch.arange(num_bits, device=device)).to(torch.int32)
-
         self._encode = (
             torch.compile(encode_axis_aligned, dynamic=True)
             if compile
@@ -109,14 +136,14 @@ class AxisAlignedPartitioner:
     def encode(self, Xt: torch.Tensor, lo: int, hi: int) -> torch.Tensor:
 
         codes = torch.empty(
-            (hi - lo, Xt.shape[1]), dtype=torch.int32, device=self.device
+            (hi - lo, Xt.shape[1]), dtype=code_dtype(self.num_bits), device=self.device
         )
 
         for a in range(lo, hi, self.encode_chunk):
             b = min(a + self.encode_chunk, hi)
 
             codes[a - lo : b - lo] = self._encode(
-                Xt, self.feature_indices[a:b], self.midpoints[a:b], self.weights
+                Xt, self.feature_indices[a:b], self.midpoints[a:b]
             )
 
         return codes
@@ -130,13 +157,22 @@ def encode_oblique(
     left: torch.Tensor,
     right: torch.Tensor,
     midpoints: torch.Tensor,
-    weights: torch.Tensor,
 ) -> torch.Tensor:
-    """`x[left] - x[right] <= midpoint` per bit -> (c, n) int32 codes."""
+    """`x[left] - x[right] <= midpoint` per bit -> (c, n) codes.
 
-    bits = (Xt[left] - Xt[right]) <= midpoints[:, :, None]  # (c, B, n)
+    One bit at a time, for the reason given in `encode_axis_aligned`.
+    """
 
-    return (bits.to(torch.int32) * weights[None, :, None]).sum(1)
+    c, num_bits = left.shape
+    dtype = code_dtype(num_bits)
+
+    code = torch.zeros((c, Xt.shape[1]), dtype=dtype, device=Xt.device)
+
+    for bit in range(num_bits):
+        difference = Xt[left[:, bit]] - Xt[right[:, bit]]
+        code |= (difference <= midpoints[:, bit, None]).to(dtype) << bit
+
+    return code
 
 
 class ObliquePartitioner:
@@ -170,8 +206,6 @@ class ObliquePartitioner:
         self.left = torch.zeros(shape, dtype=torch.int64, device=device)
         self.right = torch.zeros(shape, dtype=torch.int64, device=device)
         self.midpoints = torch.zeros(shape, dtype=torch.float32, device=device)
-
-        self.weights = (2 ** torch.arange(num_bits, device=device)).to(torch.int32)
 
         self._encode = (
             torch.compile(encode_oblique, dynamic=True) if compile else encode_oblique
@@ -210,14 +244,14 @@ class ObliquePartitioner:
     def encode(self, Xt: torch.Tensor, lo: int, hi: int) -> torch.Tensor:
 
         codes = torch.empty(
-            (hi - lo, Xt.shape[1]), dtype=torch.int32, device=self.device
+            (hi - lo, Xt.shape[1]), dtype=code_dtype(self.num_bits), device=self.device
         )
 
         for a in range(lo, hi, self.encode_chunk):
             b = min(a + self.encode_chunk, hi)
 
             codes[a - lo : b - lo] = self._encode(
-                Xt, self.left[a:b], self.right[a:b], self.midpoints[a:b], self.weights
+                Xt, self.left[a:b], self.right[a:b], self.midpoints[a:b]
             )
 
         return codes

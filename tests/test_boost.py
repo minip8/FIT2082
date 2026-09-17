@@ -14,13 +14,16 @@ import pytest
 import torch
 
 from fit2082.boost import (
+    AxisAlignedPartitioner,
     BaggedHashBoost,
+    HardPairSplitter,
     HashBoost,
     HashTables,
     ObliquePartitioner,
     Readout,
     fit_readout,
 )
+from fit2082.boost.partition import code_dtype
 from fit2082.boost.readout import RUNGS
 from fit2082.demo.boost import NewHashBoost, _predict_multi0
 
@@ -184,6 +187,126 @@ def test_device_parity():
     assert torch.allclose(
         on_cpu.predict(X), on_gpu.predict(X).cpu(), atol=1e-4, rtol=1e-4
     )
+
+
+def _partitioners(num_bits, num_hashes, num_features, device, seed=0, **kwargs):
+    """An axis-aligned and an oblique partitioner holding random splits."""
+
+    rng = np.random.default_rng(seed)
+    shape = (num_hashes, num_bits)
+
+    def ints():
+        return torch.as_tensor(rng.integers(0, num_features, shape), device=device)
+
+    def floats():
+        return torch.as_tensor(
+            rng.standard_normal(shape, dtype=np.float32), device=device
+        )
+
+    axis = AxisAlignedPartitioner(
+        num_bits=num_bits,
+        max_num_hashes=num_hashes,
+        device=torch.device(device),
+        **kwargs,
+    )
+    axis.feature_indices[:] = ints()
+    axis.midpoints[:] = floats()
+
+    oblique = ObliquePartitioner(
+        num_bits=num_bits,
+        max_num_hashes=num_hashes,
+        device=torch.device(device),
+        **kwargs,
+    )
+    oblique.left[:] = ints()
+    oblique.right[:] = ints()
+    oblique.midpoints[:] = floats()
+
+    return axis, oblique
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("num_bits", [4, 8, 9, 15, 16])
+def test_codes_are_narrow_and_match_the_direct_encoding(device, num_bits):
+    """Bit-at-a-time codes must equal the obvious weighted sum of the bits.
+
+    The widths sit either side of each dtype boundary: 8 is the widest uint8
+    code and 15 the widest int16 one, since a sixteenth bit would be int16's
+    sign. `encode_chunk=2` over five hashes also exercises a short tail chunk.
+    """
+
+    X, _, _ = _data(n=300, p=12)
+    Xt = torch.as_tensor(X, device=device).t().contiguous()
+
+    axis, oblique = _partitioners(num_bits, 5, 12, device, encode_chunk=2)
+
+    weights = 2 ** torch.arange(num_bits, device=device)
+
+    def direct(bits):
+        return (bits.to(torch.int64) * weights[None, :, None]).sum(1)
+
+    expected = {
+        axis: direct(Xt[axis.feature_indices] <= axis.midpoints[:, :, None]),
+        oblique: direct(
+            (Xt[oblique.left] - Xt[oblique.right]) <= oblique.midpoints[:, :, None]
+        ),
+    }
+
+    for partitioner, codes in expected.items():
+        # split across two calls, so a range starting past zero is covered
+        actual = torch.cat([partitioner.encode(Xt, 0, 2), partitioner.encode(Xt, 2, 5)])
+
+        assert actual.dtype == code_dtype(num_bits)
+        assert torch.equal(actual.to(torch.int64), codes)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="compiles through triton")
+def test_compiled_encoding_matches_eager():
+
+    X, _, _ = _data(n=1024, p=32)
+    Xt = torch.as_tensor(X, device="cuda").t().contiguous()
+
+    eager = _partitioners(8, 40, 32, "cuda", seed=1)
+    compiled = _partitioners(8, 40, 32, "cuda", seed=1, compile=True)
+
+    for a, b in zip(eager, compiled, strict=True):
+        assert torch.equal(a.encode(Xt, 0, 40), b.encode(Xt, 0, 40))
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("round_chunk", [None, 3])
+def test_accumulate_matches_a_round_by_round_index_add(device, round_chunk):
+    """The expanded-view scatter is one index_add_ per round, batched.
+
+    Seven rounds in chunks of three leaves a tail chunk of one.
+    """
+
+    rng = np.random.default_rng(0)
+    rounds, n, k, num_bits = 7, 200, 3, 4
+
+    tables = HashTables(
+        num_classes=k,
+        num_bits=num_bits,
+        max_num_hashes=rounds,
+        lr=0.1,
+        device=torch.device(device),
+        round_chunk=round_chunk,
+    )
+
+    codes = torch.as_tensor(
+        rng.integers(0, 2**num_bits, (rounds, n)).astype(np.uint8), device=device
+    )
+    updates = torch.as_tensor(
+        rng.standard_normal((n, 2 * k), dtype=np.float32), device=device
+    )
+
+    tables.accumulate(codes, rounds, updates)
+
+    expected = torch.zeros_like(tables.stats)
+    for r in range(rounds):
+        expected[r].index_add_(0, codes[r].to(torch.int64), updates)
+
+    assert torch.allclose(tables.stats, expected, atol=1e-5)
 
 
 @pytest.mark.parametrize("device", DEVICES)
@@ -406,6 +529,66 @@ def test_bagging_averages_estimators(device):
 
     expected = torch.stack([e.predict_proba(X) for e in bagged.estimators]).mean(0)
     assert torch.allclose(probabilities, expected, atol=1e-6)
+
+
+# == split selection ===========================================================
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_sampled_pair_order_is_random_but_stays_on_hard_examples(device):
+    """Loss-proportional order: reproducible, varied, and blind to fitted rows.
+
+    Half the batch is fitted (true class at probability ~1, cross entropy
+    ~3e-7) and half is uniformly confused (cross entropy log 4). The strict
+    ranking puts every confused example first; the sampled one must too, in
+    an order that changes with the generator and repeats with its seed.
+    """
+
+    n, k = 512, 4
+    _, Y, _ = _data(n=n, k=k)
+    Yd = torch.as_tensor(Y.astype(np.int64), device=device)
+
+    fitted = torch.arange(n, device=device) < n // 2
+
+    probabilities = torch.full((n, k), 1.0 / k, device=device)
+    probabilities[fitted] = 1e-7
+    probabilities[fitted, Yd[fitted]] = 1 - (k - 1) * 1e-7
+
+    def order(sample, seed=0):
+        generator = torch.Generator(device=device).manual_seed(seed)
+        return HardPairSplitter(generator=generator, sample=sample).order(
+            probabilities, Yd
+        )
+
+    strict = order(False)
+    assert not fitted[strict[: n // 2]].any()
+
+    sampled = order(True)
+    assert not fitted[sampled[:64]].any()
+
+    assert torch.equal(sampled, order(True, seed=0))
+    assert not torch.equal(sampled[:64], order(True, seed=1)[:64])
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_sampled_pairs_train(device):
+
+    X, Y, k = _data()
+
+    model = HashBoost(
+        num_classes=k,
+        max_num_hashes=21,
+        device=device,
+        splitter=HardPairSplitter(sample=True),
+    )
+
+    for _ in range(20):
+        model.fit_batch(X, Y)
+
+    logits = model.predict(X)
+
+    assert torch.isfinite(logits).all()
+    assert (logits.argmax(-1) != model._Y(Y)).float().mean() < 0.9
 
 
 # == partition families ========================================================
@@ -769,3 +952,148 @@ def test_readout_spans_a_heterogeneous_ensemble(device):
     assert readout.weights.shape[1] == 2**6
 
     assert torch.isfinite(readout.predict(X)).all()
+
+
+# == frozen rounds =============================================================
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_frozen_rounds_stop_updating(device):
+    """Outside the active window a round keeps exactly what it had.
+
+    With a window of 3, the batch that creates round r updates rounds r-2..r,
+    so once 5 rounds exist rounds 0-2 have had their last update and round 3
+    has not. Checking both sides of that edge pins the window's exact size.
+    """
+
+    X, Y, k = _data()
+    make = _random_splitter(10, X.shape[1], device)
+
+    model = HashBoost(
+        num_classes=k,
+        max_num_hashes=10,
+        device=device,
+        active_rounds=3,
+        splitter=make(),
+    )
+
+    for _ in range(5):
+        model.fit_batch(X, Y)
+
+    stats = model.tables.stats[:5].clone()
+    logits = model.tables.logits[:3].clone()
+
+    for _ in range(5):
+        model.fit_batch(X, Y)
+
+    assert torch.equal(model.tables.stats[:3], stats[:3])
+    assert torch.equal(model.tables.logits[:3], logits)
+
+    # every accumulation adds a positive hessian, so an update always shows
+    assert not torch.equal(model.tables.stats[3], stats[3])
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("hashes_per_round", [1, 2])
+def test_frozen_cache_matches_rereading_frozen_rounds(device, hashes_per_round):
+    """Caching per row reorders the arithmetic and must not change the result.
+
+    Each epoch draws its batches from a fresh permutation, so rows arrive
+    having last been seen at different times and disagree on how many rounds
+    they have cached -- the case the per-row mask exists for. Row ids are
+    sparse and large, so the cache also has to grow, and `round_chunk=5` makes
+    every fold and gather span several chunks.
+    """
+
+    n, batch, epochs, window = 240, 60, 6, 7
+    X, Y, k = _data(n=n)
+    rounds = epochs * (n // batch) * hashes_per_round
+    make = _random_splitter(rounds, X.shape[1], device)
+
+    def build():
+        return HashBoost(
+            num_classes=k,
+            max_num_hashes=rounds,
+            hashes_per_round=hashes_per_round,
+            device=device,
+            round_chunk=5,
+            active_rounds=window,
+            splitter=make(),
+        )
+
+    cached = build()
+    reread = build()
+
+    rng = np.random.default_rng(0)
+
+    for _ in range(epochs):
+        order = rng.permutation(n)
+
+        for start in range(0, n, batch):
+            rows = order[start : start + batch]
+
+            cached.fit_batch(X[rows], Y[rows], rows=rows * 1000 + 7)
+            reread.fit_batch(X[rows], Y[rows])
+
+    # the cache was really exercised, not bypassed
+    assert cached._frozen_upto is not None
+    assert int(cached._frozen_upto.max()) > 0
+
+    assert torch.allclose(cached.tables.logits, reread.tables.logits, atol=1e-5)
+    assert torch.allclose(cached.predict(X), reread.predict(X), atol=1e-4, rtol=1e-4)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_bagging_hands_rows_to_every_estimator(device):
+
+    X, Y, k = _data()
+    rows = np.arange(X.shape[0])
+
+    # one replay sequence per model, shared by its two estimators
+    make = _random_splitter(2 * 12, X.shape[1], device)
+
+    def build():
+        return BaggedHashBoost(
+            num_estimators=2,
+            num_classes=k,
+            max_num_hashes=12,
+            device=device,
+            active_rounds=4,
+            splitter=make(),
+        )
+
+    cached = build()
+    reread = build()
+
+    for _ in range(12):
+        cached.fit_batch(X, Y, rows=rows)
+        reread.fit_batch(X, Y)
+
+    assert all(e._frozen_upto is not None for e in cached.estimators)
+    assert torch.allclose(
+        cached.predict_proba(X), reread.predict_proba(X), atol=1e-5, rtol=1e-5
+    )
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_frozen_rounds_validate_and_reset(device):
+
+    X, Y, k = _data()
+
+    with pytest.raises(ValueError, match="active_rounds"):
+        HashBoost(num_classes=k, device=device, active_rounds=0)
+
+    model = HashBoost(num_classes=k, max_num_hashes=8, device=device, active_rounds=2)
+
+    with pytest.raises(ValueError, match="row ids"):
+        model.fit_batch(X, Y, rows=np.arange(3))
+
+    for _ in range(4):
+        model.fit_batch(X, Y, rows=np.arange(X.shape[0]))
+
+    assert model._frozen_upto is not None
+
+    # sums over the old tables' rounds must not survive a load
+    model.load_state_dict(model.state_dict())
+
+    assert model._frozen_upto is None and model._frozen_logits is None

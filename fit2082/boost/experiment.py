@@ -22,7 +22,12 @@ from typing import Any
 import numpy as np
 import torch
 
-from fit2082.boost import BaggedHashBoost, HashBoost, ObliquePartitioner
+from fit2082.boost import (
+    BaggedHashBoost,
+    HardPairSplitter,
+    HashBoost,
+    ObliquePartitioner,
+)
 from fit2082.boost.readout import fit_readout
 from fit2082.demo.utils import Dataset
 from fit2082.quant.quant import Quant
@@ -150,9 +155,10 @@ def load_split(
 
 # == variants ==================================================================
 
-# Each entry is kwargs for HashBoost, plus three keys the runner consumes
+# Each entry is kwargs for HashBoost, plus four keys the runner consumes
 # itself: "estimators" (how many to bag), "overrides" (per-estimator kwarg
-# patches) and "readout" (kwargs for a post-fit `fit_readout`).
+# patches), "readout" (kwargs for a post-fit `fit_readout`) and
+# "active_epochs" (the frozen-round window, converted to `active_rounds`).
 # Notes record what screening already measured, so results stay comparable.
 VARIANTS: dict[str, dict[str, Any]] = {
     "baseline": {},
@@ -301,6 +307,20 @@ VARIANTS: dict[str, dict[str, Any]] = {
         "hashes_per_round": 2,
         "readout": {"rung": "table", "lam": 0.1, "lr": 0.01},
     },
+    # -- sampled hard pairs ---------------------------------------------------
+    # The strict ranking forms pairs from the same few hardest examples every
+    # time a batch comes round; sampling in proportion to cross entropy keeps
+    # them on hard examples but spreads them. The splitter holds no per-round
+    # state, so one instance is safe to share across seeds and estimators.
+    "sampled_pairs": {"splitter": HardPairSplitter(sample=True)},
+    # -- frozen rounds --------------------------------------------------------
+    # Only the newest `active_epochs` epochs' worth of rounds keep
+    # accumulating; each row's frozen rounds are summed once and cached, so a
+    # batch's cost stops growing with the model. The window is in epochs, not
+    # rounds, so that one variant means the same thing on every dataset.
+    "frozen_2ep": {"active_epochs": 2},
+    "frozen_10ep": {"active_epochs": 10},
+    "frozen_10ep_capacity_2": {"active_epochs": 10, "hashes_per_round": 2},
 }
 
 
@@ -319,20 +339,31 @@ def run_once(
     seed: int,
     eval_every: int,
     device: str,
+    compile: bool = False,
 ) -> dict[str, Any]:
-    """Train one variant with one seed."""
+    """Train one variant with one seed.
+
+    `compile` is a speed knob, not part of any variant: it fuses the hash
+    encoding and leaves every result unchanged. Compilation happens inside the
+    first `fit_batch`, so it is charged to the first seed's wall time.
+    """
 
     config = dict(config)
     estimators = config.pop("estimators", None)
     overrides = config.pop("overrides", None)
     readout = config.pop("readout", None)
+    active_epochs = config.pop("active_epochs", None)
 
     per_batch = config.get("hashes_per_round", 1)
+
+    if active_epochs is not None:
+        config["active_rounds"] = active_epochs * len(split.batches) * per_batch
 
     kwargs: dict[str, Any] = dict(
         num_classes=split.num_classes,
         max_num_hashes=epochs * len(split.batches) * per_batch + 1,
         device=device,
+        compile=compile,
         **config,
     )
 
@@ -344,6 +375,16 @@ def run_once(
         else HashBoost(**kwargs)
     )
 
+    # Stable row ids, so a model with frozen rounds can cache them per row
+    # (ignored otherwise). The batches are fixed, so each is one contiguous
+    # range of ids. Kept on the host, where `fit_batch` reads them without
+    # waiting on the GPU.
+    starts = np.cumsum([0] + [Y.shape[0] for _, Y in split.batches])
+    rows = [
+        np.arange(start, start + Y.shape[0])
+        for start, (_, Y) in zip(starts, split.batches)
+    ]
+
     if device.startswith("cuda"):
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
@@ -354,8 +395,8 @@ def run_once(
     curve_y: list[float] = []
 
     for epoch in range(epochs):
-        for X, Y in split.batches:
-            model.fit_batch(X, Y)
+        for (X, Y), batch_rows in zip(split.batches, rows):
+            model.fit_batch(X, Y, rows=batch_rows)
 
         if (epoch + 1) % eval_every == 0 or epoch == epochs - 1:
             curve_x.append(model.num_rounds)
@@ -427,10 +468,11 @@ def run_variant(
     seeds: int,
     eval_every: int,
     device: str,
+    compile: bool = False,
 ) -> dict[str, Any]:
 
     runs = [
-        run_once(split, config, epochs, seed, eval_every, device)
+        run_once(split, config, epochs, seed, eval_every, device, compile)
         for seed in range(seeds)
     ]
 
@@ -482,6 +524,11 @@ def main() -> None:
     parser.add_argument("--num-train", type=int, default=32768 * 2)
     parser.add_argument("--out", default="results")
     parser.add_argument("--list", action="store_true")
+    parser.add_argument(
+        "--compile",
+        action="store_true",
+        help="torch.compile the hash encoding: faster, identical results",
+    )
     parser.add_argument(
         "--device", default="cuda" if torch.cuda.is_available() else "cpu"
     )
@@ -536,6 +583,7 @@ def main() -> None:
                     "commit": commit_hash(),
                     "dataset": args.dataset,
                     "device": args.device,
+                    "compile": args.compile,
                     "split": split.meta,
                     "epochs": args.epochs,
                     "seeds": args.seeds,
@@ -557,6 +605,7 @@ def main() -> None:
             args.seeds,
             args.eval_every,
             args.device,
+            args.compile,
         )
         models[name] = entry
         write()

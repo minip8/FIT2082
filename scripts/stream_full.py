@@ -20,7 +20,8 @@ worth having:
 * HashBoost is an online learner. `fit_batch` folds one batch into the model
   and the batch is then free, so peak memory is one batch no matter how much
   data streams past. What it pays instead is time: every batch updates the
-  buckets of all existing rounds, so total work is quadratic in rounds.
+  buckets of all existing rounds, so total work is quadratic in rounds --
+  unless `--active-epochs` freezes the older ones, which makes it linear.
 * XGBoost needs the whole binned matrix available for every boosting round.
   Streaming only changes where that matrix lives -- `ExtMemQuantileDMatrix`
   writes the ellpack to disk once and pages it back on each round.
@@ -201,12 +202,27 @@ class RawStream:
 
     def __iter__(self) -> Iterator[tuple[np.ndarray, np.ndarray]]:
 
+        for raw, y, _ in self.with_rows():
+            yield raw, y
+
+    def with_rows(self) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        """Batches as `(series, labels, row ids)`.
+
+        The ids are the rows' indices into the .npy files, so they stay the same
+        from epoch to epoch whatever the shuffle does -- which is what HashBoost's
+        frozen-round cache needs to recognise a row it has seen before.
+        """
+
         order = self._rng.permutation(self.indices) if self.shuffle else self.indices
 
         for i, start in enumerate(range(0, order.shape[0], self.batch_size)):
             batch = np.sort(order[start : start + self.batch_size])
 
-            yield np.array(self._X[batch], dtype=np.float32), np.array(self._Y[batch])
+            yield (
+                np.array(self._X[batch], dtype=np.float32),
+                np.array(self._Y[batch]),
+                batch,
+            )
 
             if self.drop_cache_every and (i + 1) % self.drop_cache_every == 0:
                 self.drop_cache()
@@ -294,6 +310,16 @@ def run_hashboost(
     # which is what `max_num_hashes` has to be sized for.
     total_rounds = args.epochs * len(stream)
 
+    # The frozen-round window, in hashes. The cache it enables is keyed by row
+    # id -- the rows' indices into the .npy, as `with_rows` yields them -- so it
+    # holds (largest index) x classes floats on the device and one int64 per
+    # index on the host: 10 MB each for LenDB.
+    active_rounds = (
+        max(1, round(args.active_epochs * len(stream) * args.hashes_per_round))
+        if args.active_epochs
+        else None
+    )
+
     kwargs: dict[str, Any] = {
         "num_classes": num_classes,
         "num_bits": args.num_bits,
@@ -301,9 +327,16 @@ def run_hashboost(
         "max_num_hashes": total_rounds * args.hashes_per_round + 1,
         "hashes_per_round": args.hashes_per_round,
         "shrinkage_tau": args.shrinkage_tau,
+        "active_rounds": active_rounds,
+        "compile": args.compile,
     }
 
-    params = {**kwargs, "max_epochs": args.epochs, "estimators": args.estimators}
+    params = {
+        **kwargs,
+        "max_epochs": args.epochs,
+        "estimators": args.estimators,
+        "active_epochs": args.active_epochs,
+    }
 
     torch.manual_seed(args.seed)
 
@@ -326,7 +359,21 @@ def run_hashboost(
     peak_mb = gpu_used_mb(device)
     read_s = 0.0
     transform_s = 0.0
+    fit_s = 0.0
+    eval_s = 0.0
     rounds = 0
+
+    # cumulative stage times at every evaluation, so where the time goes can be
+    # read as a function of model size rather than only as a total
+    timeline: list[dict[str, float]] = []
+
+    def synchronise() -> None:
+        # CUDA returns before the work is done, so without a sync each stage's
+        # device time is billed to whichever later call blocks first: QUANT's
+        # to fit_batch, fit_batch's to the next read. Syncing at the stage
+        # boundaries gives up only the little overlap those stages had.
+        if device.startswith("cuda"):
+            torch.cuda.synchronize()
 
     def evaluate() -> None:
         with torch.no_grad():
@@ -350,6 +397,9 @@ def run_hashboost(
             "rounds": rounds,
             "read_s": read_s,
             "transform_s": transform_s,
+            "fit_s": fit_s,
+            "eval_s": eval_s,
+            "timeline": timeline,
             "n_tr": int(stream.indices.shape[0]),
             "results": {
                 name: {"merror": curve([e for _, e in rec], [r for r, _ in rec])}
@@ -364,7 +414,7 @@ def run_hashboost(
         # machinery, where it cannot be timed -- and the read is the part that
         # dropping the page cache makes expensive, so it is the part worth
         # measuring. Pull each batch explicitly instead.
-        batches = iter(stream)
+        batches = stream.with_rows()
 
         while True:
             mark = time.perf_counter()
@@ -374,20 +424,39 @@ def run_hashboost(
             if batch is None:
                 break
 
-            raw, y = batch
+            raw, y, rows = batch
 
             mark = time.perf_counter()
             Z = features(raw, quant, device)
             Y = torch.as_tensor(y.astype(np.int64), device=device)
+            synchronise()
             transform_s += time.perf_counter() - mark
 
-            model.fit_batch(Z, Y)
+            mark = time.perf_counter()
+            model.fit_batch(Z, Y, rows=rows)
+            synchronise()
+            fit_s += time.perf_counter() - mark
+
             rounds += 1
 
             del Z, Y
 
             if rounds % args.eval_every == 0 or rounds == total_rounds:
+                mark = time.perf_counter()
                 evaluate()
+                eval_s += time.perf_counter() - mark
+
+                timeline.append(
+                    {
+                        "round": rounds,
+                        "wall_s": time.perf_counter() - wall,
+                        "read_s": read_s,
+                        "transform_s": transform_s,
+                        "fit_s": fit_s,
+                        "eval_s": eval_s,
+                    }
+                )
+
                 peak_mb = max(peak_mb, gpu_used_mb(device))
 
                 # a streamed run is long and has already been killed once by
@@ -405,7 +474,8 @@ def run_hashboost(
                 print(
                     f"    round {rounds:5d}/{total_rounds}  "
                     f"tr={records['tr'][-1][1]:.4f} va={records['va'][-1][1]:.4f}  "
-                    f"{time.perf_counter() - wall:6.0f}s  gpu {gpu_used_mb(device):5.0f} MB"
+                    f"{time.perf_counter() - wall:6.0f}s (fit {fit_s:4.0f}s)  "
+                    f"gpu {gpu_used_mb(device):5.0f} MB"
                     f"  rss {host_rss_mb():5.0f} MB  avail {host_available_mb():5.0f} MB",
                     flush=True,
                 )
@@ -420,8 +490,8 @@ def run_hashboost(
 
     print(
         f"  {rounds} rounds in {elapsed['wall_s']:.0f}s "
-        f"({read_s:.0f}s reading, {transform_s:.0f}s transforming)  "
-        f"va_final={va[-1]:.4f} va_best={min(va):.4f}",
+        f"({read_s:.0f}s reading, {transform_s:.0f}s transforming, "
+        f"{fit_s:.0f}s fitting)  va_final={va[-1]:.4f} va_best={min(va):.4f}",
         flush=True,
     )
 
@@ -777,6 +847,18 @@ def main() -> None:
         type=float,
         default=0.0,
         help="mass-adaptive leaf smoothing; scale with rows x epochs / 2**num_bits",
+    )
+    parser.add_argument(
+        "--active-epochs",
+        type=float,
+        default=0.0,
+        help="freeze rounds older than this many epochs' worth, so per-batch cost "
+        "stops growing with the model (0 = never freeze)",
+    )
+    parser.add_argument(
+        "--compile",
+        action="store_true",
+        help="torch.compile the hash encoding: faster, identical results",
     )
     # xgboost
     parser.add_argument("--max-bin", type=int, default=256)
