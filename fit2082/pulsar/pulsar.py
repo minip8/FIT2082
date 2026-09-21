@@ -45,7 +45,11 @@ HIST_BINS = 64
 
 
 def hist_quantiles(
-    Y: torch.Tensor, qs: tuple[float, ...], bins: int = HIST_BINS
+    Y: torch.Tensor,
+    qs: tuple[float, ...],
+    bins: int = HIST_BINS,
+    lo: torch.Tensor | None = None,
+    hi: torch.Tensor | None = None,
 ) -> list[torch.Tensor]:
     """Histogram-approximated quantiles over the last dim.
 
@@ -53,15 +57,23 @@ def hist_quantiles(
     and returns the midpoint of the first bin whose cumulative count reaches
     `q * n`. That bin is the `ceil(q * n)`-th smallest bin index, so sorting
     the bin indices gives it without building the histogram.
+
+    The sort is most of PULSAR's cost. Sorting the indices as uint8 rather
+    than float32 is exact and 1.1-1.4x faster. Counting into the 64 bins
+    instead was no faster even on 594-wide rows, and 2-7x slower on narrow
+    ones. Callers that already have the row min and max (`lo`, `hi`, without
+    the reduced dim) pass them in.
     """
 
+    assert bins <= 256
     n = Y.shape[-1]
-    lo = Y.amin(-1, keepdim=True)
-    width = (Y.amax(-1, keepdim=True) - lo) / bins
+    lo = (Y.amin(-1) if lo is None else lo).unsqueeze(-1)
+    hi = (Y.amax(-1) if hi is None else hi).unsqueeze(-1)
+    width = (hi - lo) / bins
     flat = width == 0
 
     index = ((Y - lo) / torch.where(flat, 1.0, width)).floor().clamp(max=bins - 1)
-    index = index.sort(-1).values
+    index = index.to(torch.uint8).sort(-1).values.to(Y.dtype)
 
     out = []
     for q in qs:
@@ -98,14 +110,15 @@ def local_stats(S: torch.Tensor) -> torch.Tensor:
     """
 
     mean = S.mean(-1)
-    q1, median, q3 = hist_quantiles(S, (0.25, 0.5, 0.75))
+    lo, hi = S.amin(-1), S.amax(-1)
+    q1, median, q3 = hist_quantiles(S, (0.25, 0.5, 0.75), lo=lo, hi=hi)
 
     stats = (
         mean,
         _std(S, mean, 1e-14),
         _slope(S),
-        S.amin(-1),
-        S.amax(-1),
+        lo,
+        hi,
         median,
         q3 - q1,
     )
@@ -140,7 +153,7 @@ def pool(Y: torch.Tensor) -> torch.Tensor:
     # float64 and gets the constant back exactly
     mean = torch.minimum(torch.maximum(Y.mean(-1), lo), hi)
     m = mean.unsqueeze(-1)
-    q1, median, q3 = hist_quantiles(Y, (0.25, 0.5, 0.75))
+    q1, median, q3 = hist_quantiles(Y, (0.25, 0.5, 0.75), lo=lo, hi=hi)
 
     if n > 1:
         prev, cur = Y[..., :-1], Y[..., 1:]
