@@ -52,21 +52,39 @@ Tiselac 27,346 and LenDB 44,253. At 65,536 rows these would be 6.7 GB and
 over the reference run's 65,536 training rows (`--fit-rows`), then transforms
 each streamed batch like QUANT. Only one batch is on the device at a time,
 which is also how Tiselac and LenDB can run at all. The cost is recomputed
-every epoch. Measured per 4,096-row batch, one timed call each on random
-data of each dataset's shape:
+every epoch.
 
-| dataset | PULSAR | QUANT | peak GPU |
-| --- | ---: | ---: | ---: |
-| Pedestrian / Traffic | 98 ms | 34 ms | 235 MB |
-| Tiselac | 698 ms | 44 ms | 1,024 MB |
-| InsectSound | 2,735 ms | 142 ms | 597 MB |
-| LenDB | 7,104 ms | 150 ms | 1,544 MB |
+Two speed-ups, per 4,096-row batch (median of five transforms on
+random-walk data of each dataset's shape):
 
-Traffic streams at about 28 s of transform per epoch over its 1,160,582 rows.
-LenDB would take about 28 minutes per epoch, roughly 2.4 hours for the 5-epoch
-stream that takes 6 minutes with QUANT. The port computes every local feature
-and then keeps 40%, so computing only the kept ones (as upstream does at test
-time) is the obvious speed-up. It has not been profiled.
+| dataset | original port | uint8 sort (`f5a5188`) | + `--compile` (`144900b`) | QUANT |
+| --- | ---: | ---: | ---: | ---: |
+| Traffic | 108 ms | 95 ms | **49 ms** | 34 ms |
+| InsectSound | 2,658 ms | 2,327 ms | **1,137 ms** | 142 ms |
+| LenDB | 7,257 ms | 6,224 ms | **3,026 ms** | 150 ms |
+
+* **Where the time went:** pooling was 77% of a batch and the histogram
+  median/IQR 56%. That work was a key-value `torch.sort` over each
+  partition, plus ~80k kernel launches per batch.
+* **Sorting the bin indices as uint8** is exact: the output is identical.
+* **`--compile`** wraps the pooling and statistics in
+  `torch.compile(dynamic=True)`, which fuses about 40 small ops per call.
+  It is *not* bit-identical: reordered float ops tip about 1% of feature
+  values across a bin or threshold. On real InsectSound the Fisher selection
+  was unchanged, and one seed each read 0.2246 eager and 0.2244 compiled. It
+  costs ~15 s of compilation, so in `experiment.py` InsectSound's setup only
+  drops from 42.5 s to 38.0 s. The gain is in streams.
+* **Tried and dropped:**
+  - counting into the 64 bins (no faster at width 594, 2-7x slower on narrow
+    rows);
+  - bisecting over bins (slower everywhere);
+  - pruning the pooling the selection discards. That was slower, because 94%
+    of (interval, level, stat) blocks keep a column and the extra launches
+    cost more than the skipped sorts.
+
+At the compiled rate, a 10-epoch whole-pool Traffic stream spends about
+140 s transforming (308 s before), and a 5-epoch LenDB stream about 1 hour
+(2.4 h before).
 
     uv run python scripts/stream_full.py --dataset Traffic --transform pulsar \
         --epochs 10 --compile
