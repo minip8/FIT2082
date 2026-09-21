@@ -71,6 +71,20 @@ time) is the obvious speed-up. It has not been profiled.
     uv run python scripts/stream_full.py --dataset Traffic --transform pulsar \
         --epochs 10 --compile
 
+**Traffic, whole pool (1,160,582 rows), 10 epochs, unfrozen.** One run each,
+back to back at `2fbeeaf`. As in `hashboost-screen`, validation error is the
+mean of the last seven evaluations:
+
+| transform | val error | train error | transform | `fit_batch` | wall |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| QUANT | **0.3895** | 0.3423 | 138s | 30s | 172s |
+| PULSAR | 0.3931 | 0.3484 | 308s | 26s | 337s |
+
+The 0.004 gap is inside the noise: consecutive evaluations on these 4,096
+rows differ by up to 0.01, and the QUANT stream at `157e54d` read 0.3922.
+So on Traffic, PULSAR is level with QUANT at twice the wall time. Fitting it
+took 3s, and the transform took 308s against the ~280s projected above.
+
 #### Faithfulness of the port
 
 Checked once in scratch against upstream's own code (numba, statsmodels 0.14);
