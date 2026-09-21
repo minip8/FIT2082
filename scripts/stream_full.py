@@ -309,7 +309,7 @@ def fit_quant(stream: RawStream, device: str) -> tuple[Quant, dict[str, Any]]:
 
 
 def fit_pulsar(
-    stream: RawStream, fit_rows: int, device: str
+    stream: RawStream, fit_rows: int, device: str, compile: bool = False
 ) -> tuple[Pulsar, dict[str, Any]]:
     """PULSAR's Fisher selection needs labels, so fit it in one labelled pass.
 
@@ -331,7 +331,7 @@ def fit_pulsar(
             )
 
     mark = time.perf_counter()
-    pulsar = Pulsar().fit(batches())
+    pulsar = Pulsar(compile=compile).fit(batches())
     if device.startswith("cuda"):
         torch.cuda.synchronize()
 
@@ -342,6 +342,7 @@ def fit_pulsar(
         "top_percent": pulsar.top_percent,
         "num_ops": pulsar.num_ops,
         "max_dilation": pulsar.max_dilation,
+        "compile": pulsar.compile,
         "fit_rows": int(indices.shape[0]),
         "fit_s": time.perf_counter() - mark,
         "num_features": pulsar.num_features,
@@ -927,7 +928,8 @@ def main() -> None:
     parser.add_argument(
         "--compile",
         action="store_true",
-        help="torch.compile the hash encoding: faster, identical results",
+        help="torch.compile the hash encoding (faster, identical results) and, "
+        "with --transform pulsar, PULSAR's pooling (2x faster, not bit-identical)",
     )
     # xgboost
     parser.add_argument("--max-bin", type=int, default=256)
@@ -1005,7 +1007,7 @@ def main() -> None:
 
     if args.transform == "pulsar":
         transform, transform_info = fit_pulsar(
-            stream, args.fit_rows or args.n_ref, device
+            stream, args.fit_rows or args.n_ref, device, args.compile
         )
     else:
         transform, transform_info = fit_quant(stream, device)

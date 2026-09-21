@@ -32,7 +32,7 @@ Departures from upstream, all deliberate:
 """
 
 import math
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 import torch
@@ -177,7 +177,9 @@ def pool(Y: torch.Tensor) -> torch.Tensor:
     return torch.stack(pooled, -1)
 
 
-def pool_partitions(T: torch.Tensor, parts: int) -> torch.Tensor:
+def pool_partitions(
+    T: torch.Tensor, parts: int, pool_fn: Callable[[torch.Tensor], torch.Tensor] = pool
+) -> torch.Tensor:
     """Pool `parts` near-equal contiguous partitions: (..., n) -> (..., parts, 9).
 
     As in upstream's `get_partitions`, the first `n % parts` partitions are one
@@ -188,9 +190,9 @@ def pool_partitions(T: torch.Tensor, parts: int) -> torch.Tensor:
     blocks = []
 
     if r:
-        blocks.append(pool(T[..., : r * (s + 1)].unflatten(-1, (r, s + 1))))
+        blocks.append(pool_fn(T[..., : r * (s + 1)].unflatten(-1, (r, s + 1))))
     if parts > r:
-        blocks.append(pool(T[..., r * (s + 1) :].unflatten(-1, (parts - r, s))))
+        blocks.append(pool_fn(T[..., r * (s + 1) :].unflatten(-1, (parts - r, s))))
 
     return torch.cat(blocks, -2)
 
@@ -362,6 +364,7 @@ class Pulsar:
         standardise: bool = True,
         seed: int = 0,
         chunk_elements: int = 1 << 25,
+        compile: bool = False,
     ) -> None:
 
         assert all(length >= 2 for length in lengths)
@@ -378,6 +381,24 @@ class Pulsar:
         # rows per chunk are sized so the unselected feature matrix stays below
         # this many floats; the per-interval intermediates are of the same order
         self.chunk_elements = chunk_elements
+
+        # torch.compile fuses the ~40 small ops in each pooling and statistics
+        # call: 2x per batch on InsectSound and LenDB. Unlike HashBoost's
+        # `compile` it is *not* bit-identical -- reordered float ops tip ~1%
+        # of feature values across a histogram bin or threshold (on real
+        # InsectSound the selection was unchanged) -- so it is opt-in and
+        # recorded. Widths differ per interval and level: the Traffic,
+        # InsectSound and LenDB shapes took 20 recompiles between them, and at
+        # the default limit of 8 most would fall back to eager.
+        self.compile = compile
+        if compile:
+            dynamo = torch._dynamo.config
+            dynamo.recompile_limit = max(dynamo.recompile_limit, 64)  # ty: ignore[invalid-assignment]
+            self._pool = torch.compile(pool, dynamic=True)
+            self._local_stats = torch.compile(local_stats, dynamic=True)
+        else:
+            self._pool = pool
+            self._local_stats = local_stats
 
         self.intervals: dict[str, list[Interval]] = {}
         self.fitted = False
@@ -431,15 +452,15 @@ class Pulsar:
             Z = represent(rows, name)
 
             for interval in intervals:
-                T = local_stats(interval.segments(Z))
+                T = self._local_stats(interval.segments(Z))
 
                 if interval.has_global:
-                    global_parts.append(pool_partitions(T, 1).flatten(1))
+                    global_parts.append(pool_partitions(T, 1, self._pool).flatten(1))
 
                 if interval.levels > 1:
                     pooled = torch.cat(
                         [
-                            pool_partitions(T, 2**level)
+                            pool_partitions(T, 2**level, self._pool)
                             for level in range(1, interval.levels)
                         ],
                         -2,

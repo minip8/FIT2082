@@ -66,6 +66,7 @@ def load_split(
     seed: int = 123,
     transform: str = "quant",
     device: str = "cuda",
+    compile: bool = False,
 ) -> Split:
     """Load, transform and cache one split on the device.
 
@@ -120,7 +121,7 @@ def load_split(
     elif transform == "pulsar":
         # supervised: the Fisher-score selection sees every training batch,
         # and nothing else -- validation and tune rows only pass through it
-        pulsar = Pulsar().fit(training)
+        pulsar = Pulsar(compile=compile).fit(training)
         apply = pulsar.transform
         params = {
             "lengths": pulsar.lengths,
@@ -128,6 +129,7 @@ def load_split(
             "top_percent": pulsar.top_percent,
             "num_ops": pulsar.num_ops,
             "max_dilation": pulsar.max_dilation,
+            "compile": pulsar.compile,
         }
     elif transform == "none":
 
@@ -552,7 +554,8 @@ def main() -> None:
     parser.add_argument(
         "--compile",
         action="store_true",
-        help="torch.compile the hash encoding: faster, identical results",
+        help="torch.compile the hash encoding (faster, identical results) and, "
+        "with --transform pulsar, PULSAR's pooling (2x faster, not bit-identical)",
     )
     parser.add_argument(
         "--device", default="cuda" if torch.cuda.is_available() else "cpu"
@@ -576,6 +579,7 @@ def main() -> None:
         batch_size=args.batch_size,
         transform=args.transform,
         device=args.device,
+        compile=args.compile,
     )
 
     print(

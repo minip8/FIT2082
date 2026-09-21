@@ -46,7 +46,7 @@ def upstream_hist_quantile(row: np.ndarray, q: float, bins: int = 64) -> float:
 # == statistics ================================================================
 
 
-@pytest.mark.parametrize("n", [1, 2, 7, 11, 64, 301])
+@pytest.mark.parametrize("n", [1, 2, 7, 11, 64, 301, 600])
 def test_hist_quantiles_match_upstream_loop(n):
 
     rng = np.random.default_rng(n)
@@ -260,3 +260,27 @@ def test_pulsar_cpu_and_cuda_agree():
     # histogram quantiles can land a bin apart under different rounding
     close = torch.isclose(Zc, Zg, atol=1e-3, rtol=1e-3).float().mean()
     assert close > 0.995
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs cuda")
+def test_compiled_pulsar_agrees_with_eager_at_the_tie_level():
+    """`compile=True` reorders float ops, so it may tip a value across a
+    histogram bin or threshold, but must otherwise give the same features."""
+
+    generator = torch.Generator().manual_seed(0)
+    Y = torch.randint(0, 3, (256,), generator=generator)
+    X = torch.randn(256, 1, 60, generator=generator).cumsum(-1)
+    X = X + Y.view(-1, 1, 1)  # informative, so the Fisher ranking has few ties
+    X, Y = X.cuda(), Y.cuda()
+
+    eager = Pulsar().fit([(X, Y)])
+    compiled = Pulsar(compile=True).fit([(X, Y)])
+
+    shared = np.intersect1d(eager.selected.cpu(), compiled.selected.cpu())
+    assert len(shared) >= 0.99 * len(eager.selected)
+
+    G = eager.channels * eager.num_global
+    close = torch.isclose(
+        eager.transform(X)[:, :G], compiled.transform(X)[:, :G], atol=1e-3, rtol=1e-3
+    )
+    assert close.float().mean() > 0.97
