@@ -30,6 +30,7 @@ from fit2082.boost import (
 )
 from fit2082.boost.readout import fit_readout
 from fit2082.demo.utils import Dataset
+from fit2082.pulsar.pulsar import Pulsar
 from fit2082.quant.quant import Quant
 
 # == data ======================================================================
@@ -68,8 +69,9 @@ def load_split(
 ) -> Split:
     """Load, transform and cache one split on the device.
 
-    The QUANT transform dominates setup, so it is applied once here and the
-    features are reused by every variant in the sweep.
+    The feature transform (QUANT or PULSAR) dominates setup, so it is applied
+    once here and the features are reused by every variant in the sweep.
+    PULSAR is supervised and is fitted on the training batches alone.
 
     The tune slice is taken from *after* the validation slice rather than out
     of the training indices, so that adding it leaves both the training set and
@@ -108,28 +110,47 @@ def load_split(
 
     data.close()
 
+    began = time.perf_counter()
+    params: dict[str, Any] = {}
+
     if transform == "quant":
         quant = Quant()
         quant.fit_transform(training[0][0])
-
-        def features(subset):
-            return torch.cat([quant.transform(X) for X, _ in subset])
-
-        batches = [(quant.transform(X), Y) for X, Y in training]
+        apply = quant.transform
+    elif transform == "pulsar":
+        # supervised: the Fisher-score selection sees every training batch,
+        # and nothing else -- validation and tune rows only pass through it
+        pulsar = Pulsar().fit(training)
+        apply = pulsar.transform
+        params = {
+            "lengths": pulsar.lengths,
+            "depth": pulsar.depth,
+            "top_percent": pulsar.top_percent,
+            "num_ops": pulsar.num_ops,
+            "max_dilation": pulsar.max_dilation,
+        }
     elif transform == "none":
 
-        def features(subset):
-            return torch.cat([X.reshape(X.shape[0], -1) for X, _ in subset])
+        def apply(X):
+            return X.reshape(X.shape[0], -1)
 
-        batches = [(X.reshape(X.shape[0], -1), Y) for X, Y in training]
     else:
         raise ValueError(f"unknown transform {transform!r}")
+
+    def features(subset):
+        return torch.cat([apply(X) for X, _ in subset])
+
+    batches = [(apply(X), Y) for X, Y in training]
 
     X_va = features(validation)
     Y_va = torch.cat([Y for _, Y in validation])
 
     X_tune = features(tuning) if tuning else None
     Y_tune = torch.cat([Y for _, Y in tuning]) if tuning else None
+
+    if X_va.is_cuda:
+        torch.cuda.synchronize()
+    transform_s = time.perf_counter() - began
 
     return Split(
         batches=batches,
@@ -148,6 +169,8 @@ def load_split(
             "batch_size": batch_size,
             "num_classes": num_classes,
             "transform": transform,
+            "transform_params": params,
+            "transform_s": transform_s,
             "num_features": batches[0][0].shape[1],
         },
     )
@@ -515,7 +538,9 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--path", default="data")
     parser.add_argument("--dataset", default="Pedestrian")
-    parser.add_argument("--transform", default="quant", choices=("quant", "none"))
+    parser.add_argument(
+        "--transform", default="quant", choices=("quant", "pulsar", "none")
+    )
     parser.add_argument("--variants", default="baseline")
     parser.add_argument("--seeds", type=int, default=3)
     parser.add_argument("--epochs", type=int, default=50)
@@ -555,7 +580,8 @@ def main() -> None:
 
     print(
         f"{args.dataset}: {len(split.batches)} batches x {tuple(split.batches[0][0].shape)}, "
-        f"{split.num_classes} classes, transform={args.transform}, "
+        f"{split.num_classes} classes, transform={args.transform} "
+        f"({split.meta['transform_s']:.1f}s), "
         f"{args.seeds} seeds x {args.epochs} epochs\n"
     )
     print(
@@ -563,7 +589,10 @@ def main() -> None:
         f"{'rounds':>7s} {'wall':>8s} {'peak':>8s}"
     )
 
-    out = Path(args.out) / f"{args.dataset}-sweep-{commit_hash()}.json"
+    # QUANT keeps the original name, which the notebooks glob for; any other
+    # transform is named so a back-to-back control sweep does not overwrite it
+    tag = "" if args.transform == "quant" else f"{args.transform}-"
+    out = Path(args.out) / f"{args.dataset}-{tag}sweep-{commit_hash()}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
 
     models: dict[str, Any] = {}
