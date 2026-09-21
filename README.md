@@ -2,6 +2,129 @@
 
 ## Benchmarks
 
+### pulsar
+
+PULSAR (Cabello & Kulik, ICDM 2025) as a second feature transform, ported to
+torch in `fit2082/pulsar/pulsar.py` and selected with `--transform pulsar`.
+It is supervised: the Fisher-score selection is fitted on every training batch
+and nothing else. Train and validation rows are the same as in every QUANT
+sweep, so the two transforms are compared on identical rows. Sweeps for any
+transform other than QUANT are written to `results/{dataset}-{transform}-sweep-{commit}.json`.
+
+    uv run python -m fit2082.boost.experiment --dataset InsectSound --num-train 32768 \
+        --transform pulsar --seeds 3 --compile --variants baseline,sampled_pairs
+
+3 seeds, compiled. The two transforms ran as back-to-back invocations (one
+`load_split` each):
+
+| dataset | variant | QUANT | PULSAR |
+| --- | --- | ---: | ---: |
+| InsectSound | `baseline` | 0.2699 +- 0.0094 | **0.2262 +- 0.0044** |
+| | `sampled_pairs` | 0.2625 +- 0.0030 | **0.2258 +- 0.0028** |
+| Pedestrian | `baseline` | **0.2326 +- 0.0059** | 0.2481 +- 0.0034 |
+| | `sampled_pairs` | **0.2213 +- 0.0066** | 0.2393 +- 0.0037 |
+
+* **InsectSound: -0.044**, the biggest single gain in this log. It beats
+  ANOVA-F weighting of QUANT's features (-0.027 to -0.036 in the screen) and
+  closes about half the gap to XGBoost's 0.189. Sampled pairs add nothing on
+  top of it.
+* **Pedestrian: +0.016 to +0.018**, several times the noise floor. Pedestrian
+  is the dataset F weighting did not move either. One untested explanation
+  is dilution: HashBoost draws features uniformly, and PULSAR offers 3,000
+  columns against QUANT's 212.
+
+Cost. The transform is a one-off setup cost, and features stay cached on the
+device:
+
+| dataset | features (QUANT) | transform (QUANT) | peak GPU | fit wall |
+| --- | --- | ---: | ---: | ---: |
+| InsectSound | 14,811 (5,470) | 48.2s (1.9s) | 2,650 MB | 3.5s |
+| Pedestrian | 3,000 (212) | 3.3s (0.9s) | 1,154 MB | 9.4s |
+
+Feature counts at upstream's defaults, with 40% of local features kept:
+Tiselac 27,346 and LenDB 44,253. At 65,536 rows these would be 6.7 GB and
+10.8 GB, so they will not fit in `experiment.py`'s device cache without a lower
+`top_percent`, and neither has been run.
+
+#### Streaming
+
+`scripts/stream_full.py --transform pulsar` fits PULSAR in one labelled pass
+over the reference run's 65,536 training rows (`--fit-rows`), then transforms
+each streamed batch like QUANT. Only one batch is on the device at a time,
+which is also how Tiselac and LenDB can run at all. The cost is recomputed
+every epoch.
+
+Two speed-ups, per 4,096-row batch (median of five transforms on
+random-walk data of each dataset's shape):
+
+| dataset | original port | uint8 sort (`f5a5188`) | + `--compile` (`144900b`) | QUANT |
+| --- | ---: | ---: | ---: | ---: |
+| Traffic | 108 ms | 95 ms | **49 ms** | 34 ms |
+| InsectSound | 2,658 ms | 2,327 ms | **1,137 ms** | 142 ms |
+| LenDB | 7,257 ms | 6,224 ms | **3,026 ms** | 150 ms |
+
+* **Where the time went:** pooling was 77% of a batch and the histogram
+  median/IQR 56%. That work was a key-value `torch.sort` over each
+  partition, plus ~80k kernel launches per batch.
+* **Sorting the bin indices as uint8** is exact: the output is identical.
+* **`--compile`** wraps the pooling and statistics in
+  `torch.compile(dynamic=True)`, which fuses about 40 small ops per call.
+  It is *not* bit-identical: reordered float ops tip about 1% of feature
+  values across a bin or threshold. On real InsectSound the Fisher selection
+  was unchanged, and one seed each read 0.2246 eager and 0.2244 compiled. It
+  costs ~15 s of compilation, so in `experiment.py` InsectSound's setup only
+  drops from 42.5 s to 38.0 s. The gain is in streams.
+* **Tried and dropped:**
+  - counting into the 64 bins (no faster at width 594, 2-7x slower on narrow
+    rows);
+  - bisecting over bins (slower everywhere);
+  - pruning the pooling the selection discards. That was slower, because 94%
+    of (interval, level, stat) blocks keep a column and the extra launches
+    cost more than the skipped sorts.
+
+At the compiled rate, a 10-epoch whole-pool Traffic stream spends about
+140 s transforming (308 s before), and a 5-epoch LenDB stream about 1 hour
+(2.4 h before).
+
+    uv run python scripts/stream_full.py --dataset Traffic --transform pulsar \
+        --epochs 10 --compile
+
+**Traffic, whole pool (1,160,582 rows), 10 epochs, unfrozen.** One run each,
+back to back at `2fbeeaf`. As in `hashboost-screen`, validation error is the
+mean of the last seven evaluations:
+
+| transform | val error | train error | transform | `fit_batch` | wall |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| QUANT | **0.3895** | 0.3423 | 138s | 30s | 172s |
+| PULSAR | 0.3931 | 0.3484 | 308s | 26s | 337s |
+
+The 0.004 gap is inside the noise: consecutive evaluations on these 4,096
+rows differ by up to 0.01, and the QUANT stream at `157e54d` read 0.3922.
+So on Traffic, PULSAR is level with QUANT at twice the wall time. Fitting it
+took 3s, and the transform took 308s against the ~280s projected above.
+
+#### Faithfulness of the port
+
+Checked once in scratch against upstream's own code (numba, statsmodels 0.14);
+the repo does not keep that oracle, and `tests/test_pulsar.py` checks against
+transcriptions of upstream's loops instead.
+
+* Feature counts are identical for every representation, for lengths 24, 60
+  and 150. The batched Burg recursion matches `statsmodels.burg` to 5e-8. The
+  histogram median and IQR match upstream exactly on 200k rows.
+* Global features agree column-for-column to 1e-4. The exception is
+  near-constant partitions, where upstream reports a stdev of ~0.006 that is
+  rounding noise: it squares float32 values before its float64 subtraction.
+  The port computes centred moments and returns 0 there.
+* About 0.5% of local features differ, all at ties: a histogram bin boundary,
+  a mean-crossing, or a stdev threshold, reached through last-bit differences
+  in the float32 statistics.
+
+Departures from upstream, all deliberate and listed in the module docstring:
+multivariate input is handled channel by channel, as QUANT does; the Fisher
+score and scaler are accumulated over batches; and the AR order is clamped to
+`length - 2`.
+
 ### hashboost-screen
 
 A profile of `fit_batch`, three changes it led to, and a screen of about 30
