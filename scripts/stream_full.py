@@ -36,6 +36,13 @@ run, and is what `--n-ref` defaults to.
     uv run python scripts/stream_full.py --dataset LenDB --model hashboost --epochs 5
     uv run python scripts/stream_full.py --dataset Traffic --model xgboost \
         --num-boost-round 50
+    uv run python scripts/stream_full.py --dataset Traffic --transform pulsar --epochs 10
+
+The feature transform is QUANT by default. `--transform pulsar` swaps in
+PULSAR, which is supervised: it is fitted first, in one labelled pass over the
+reference run's training rows (`--fit-rows`), and then applied batch by batch
+like QUANT. Its runs go to `<dataset>-pulsar-full-<commit>.json`, since a
+results file records one transform for all the models in it.
 
 Arguments can also be piped in with `--stdin`, which is easier to generate than
 a command line when the same script is being run over several datasets --
@@ -52,7 +59,7 @@ import os
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import numpy as np
 import torch
@@ -61,6 +68,7 @@ import xgboost.callback
 
 from fit2082.boost import BaggedHashBoost, HashBoost
 from fit2082.cli import parse_args
+from fit2082.pulsar.pulsar import Pulsar
 from fit2082.quant.quant import Quant
 from fit2082.results import (
     commit_hash,
@@ -276,7 +284,13 @@ def drop_page_cache(directory: Path) -> None:
             os.close(fd)
 
 
-def fit_quant(stream: RawStream, device: str) -> tuple[Quant, int]:
+class Transform(Protocol):
+    """A fitted feature transform: QUANT or PULSAR."""
+
+    def transform(self, X: torch.Tensor) -> torch.Tensor: ...
+
+
+def fit_quant(stream: RawStream, device: str) -> tuple[Quant, dict[str, Any]]:
     """QUANT carries no data-dependent state, so one row fixes the transform."""
 
     raw, _ = stream.gather(stream.indices[:1])
@@ -284,12 +298,59 @@ def fit_quant(stream: RawStream, device: str) -> tuple[Quant, int]:
     quant = Quant()
     quant.fit_transform(torch.as_tensor(raw, device=device))
 
-    return quant, quant.transform(torch.as_tensor(raw, device=device)).shape[1]
+    num_features = quant.transform(torch.as_tensor(raw, device=device)).shape[1]
+
+    return quant, {
+        "name": "quant",
+        "depth": quant.depth,
+        "div": quant.div,
+        "num_features": num_features,
+    }
 
 
-def features(raw: np.ndarray, quant: Quant, device: str) -> torch.Tensor:
+def fit_pulsar(
+    stream: RawStream, fit_rows: int, device: str
+) -> tuple[Pulsar, dict[str, Any]]:
+    """PULSAR's Fisher selection needs labels, so fit it in one labelled pass.
 
-    return quant.transform(torch.as_tensor(raw, device=device))
+    The pass covers the first `fit_rows` training indices. Those are the
+    reference run's training rows, so a streamed PULSAR model selects its
+    features from the same rows an in-memory run would. They are read in
+    sorted batches, like the stream, and only one batch is on the device at a
+    time: `Pulsar.fit` accumulates class moments as it goes.
+    """
+
+    indices = stream.indices[:fit_rows]
+
+    def batches() -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
+        for start in range(0, indices.shape[0], stream.batch_size):
+            raw, y = stream.gather(indices[start : start + stream.batch_size])
+            yield (
+                torch.as_tensor(raw, device=device),
+                torch.as_tensor(y.astype(np.int64), device=device),
+            )
+
+    mark = time.perf_counter()
+    pulsar = Pulsar().fit(batches())
+    if device.startswith("cuda"):
+        torch.cuda.synchronize()
+
+    return pulsar, {
+        "name": "pulsar",
+        "lengths": pulsar.lengths,
+        "depth": pulsar.depth,
+        "top_percent": pulsar.top_percent,
+        "num_ops": pulsar.num_ops,
+        "max_dilation": pulsar.max_dilation,
+        "fit_rows": int(indices.shape[0]),
+        "fit_s": time.perf_counter() - mark,
+        "num_features": pulsar.num_features,
+    }
+
+
+def features(raw: np.ndarray, transform: Transform, device: str) -> torch.Tensor:
+
+    return transform.transform(torch.as_tensor(raw, device=device))
 
 
 # == hashboost =================================================================
@@ -297,7 +358,7 @@ def features(raw: np.ndarray, quant: Quant, device: str) -> torch.Tensor:
 
 def run_hashboost(
     stream: RawStream,
-    quant: Quant,
+    transform: Transform,
     holdouts: dict[str, tuple[torch.Tensor, torch.Tensor]],
     num_classes: int,
     args: argparse.Namespace,
@@ -427,7 +488,7 @@ def run_hashboost(
             raw, y, rows = batch
 
             mark = time.perf_counter()
-            Z = features(raw, quant, device)
+            Z = features(raw, transform, device)
             Y = torch.as_tensor(y.astype(np.int64), device=device)
             synchronise()
             transform_s += time.perf_counter() - mark
@@ -501,8 +562,8 @@ def run_hashboost(
 # == xgboost ===================================================================
 
 
-class StreamedQuant(xgb.DataIter):
-    """Feeds the streamed QUANT features to XGBoost's external-memory builder.
+class StreamedFeatures(xgb.DataIter):
+    """Feeds the streamed features to XGBoost's external-memory builder.
 
     `on_host=False` sends the cached ellpack pages to `cache_prefix` on disk:
     LenDB's full pool bins to roughly 40 GB, which fits neither the 8 GB card
@@ -513,14 +574,14 @@ class StreamedQuant(xgb.DataIter):
     def __init__(
         self,
         stream: RawStream,
-        quant: Quant,
+        transform: Transform,
         device: str,
         cache_prefix: str,
         drop_cache_every: int = 20,
     ) -> None:
 
         self._stream = stream
-        self._quant = quant
+        self._transform = transform
         self._device = device
         self._cache_dir = Path(cache_prefix).parent
         self._drop_cache_every = drop_cache_every
@@ -546,7 +607,7 @@ class StreamedQuant(xgb.DataIter):
             return False
 
         raw, y = batch
-        Z = features(raw, self._quant, self._device)
+        Z = features(raw, self._transform, self._device)
 
         input_data(data=Z, label=y)
 
@@ -620,7 +681,7 @@ class MemoryProbe(xgb.callback.TrainingCallback):
 
 def run_xgboost(
     stream: RawStream,
-    quant: Quant,
+    transform: Transform,
     holdouts: dict[str, tuple[torch.Tensor, torch.Tensor]],
     num_classes: int,
     args: argparse.Namespace,
@@ -664,9 +725,9 @@ def run_xgboost(
     baseline_mb = gpu_used_mb(device)
     build_wall, build_cpu = time.perf_counter(), time.process_time()
 
-    it = StreamedQuant(
+    it = StreamedFeatures(
         stream,
-        quant,
+        transform,
         device,
         str(cache / args.dataset.lower()),
         drop_cache_every=args.drop_cache_every,
@@ -802,6 +863,14 @@ def main() -> None:
         "control on a smaller pool sit beside the full run in one file.",
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--transform", default="quant", choices=("quant", "pulsar"))
+    parser.add_argument(
+        "--fit-rows",
+        type=int,
+        default=None,
+        help="PULSAR only: training rows its feature selection is fitted on "
+        "(default: --n-ref, the reference run's training set)",
+    )
     parser.add_argument(
         "--n-ref",
         type=int,
@@ -934,14 +1003,27 @@ def main() -> None:
 
     raw_gb = tr.shape[0] * np.prod(stream._X.shape[1:]) * 4 / 1e9
 
-    quant, num_features = fit_quant(stream, device)
+    if args.transform == "pulsar":
+        transform, transform_info = fit_pulsar(
+            stream, args.fit_rows or args.n_ref, device
+        )
+    else:
+        transform, transform_info = fit_quant(stream, device)
+
+    num_features = transform_info["num_features"]
 
     print(
         f"{args.dataset}: streaming {tr.shape[0]} training rows "
         f"({raw_gb:.1f} GB raw, {tr.shape[0] * num_features * 4 / 1e9:.1f} GB as "
-        f"{num_features} QUANT features -- neither materialised)",
+        f"{num_features} {args.transform.upper()} features -- neither materialised)",
         flush=True,
     )
+    if "fit_s" in transform_info:
+        print(
+            f"  PULSAR fitted on {transform_info['fit_rows']} rows in "
+            f"{transform_info['fit_s']:.0f}s",
+            flush=True,
+        )
     print(
         f"  reference run trained on {args.n_ref}; "
         + (
@@ -957,7 +1039,7 @@ def main() -> None:
     for name, indices in (("tr", tr[: args.eval_subsample]), ("va", va)):
         raw, y = stream.gather(indices)
         holdouts[name] = (
-            features(raw, quant, device),
+            features(raw, transform, device),
             torch.as_tensor(y.astype(np.int64), device=device),
         )
 
@@ -969,7 +1051,10 @@ def main() -> None:
         flush=True,
     )
 
-    out = Path(args.out) / f"{args.dataset}-full-{commit_hash()}.json"
+    # one transform per results file: `write_results` keeps a single
+    # file-level "transform" block, which a PULSAR run would overwrite
+    tag = "" if args.transform == "quant" else f"{args.transform}-"
+    out = Path(args.out) / f"{args.dataset}-{tag}full-{commit_hash()}.json"
 
     info = {
         "commit": commit_hash(),
@@ -987,12 +1072,7 @@ def main() -> None:
             "streamed": True,
             "reference_n_tr": args.n_ref,
         },
-        "transform": {
-            "name": "quant",
-            "depth": quant.depth,
-            "div": quant.div,
-            "num_features": num_features,
-        },
+        "transform": transform_info,
     }
 
     label = args.label or args.model
@@ -1001,7 +1081,9 @@ def main() -> None:
         write_results(out, {label: entry}, info)
 
     runner = run_hashboost if args.model == "hashboost" else run_xgboost
-    checkpoint(runner(stream, quant, holdouts, num_classes, args, device, checkpoint))
+    checkpoint(
+        runner(stream, transform, holdouts, num_classes, args, device, checkpoint)
+    )
 
     print(f"\nwrote {out}", flush=True)
 
