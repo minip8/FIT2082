@@ -79,8 +79,9 @@ Also:
 - `fit2082/quant/quant.py`: QUANT transform (third-party research code, adapted
   for torch). `fit2082/demo/utils.py` has `Dataset`, the memmapped `.npy` loader.
 - `fit2082/pulsar/pulsar.py`: PULSAR transform, a torch port of GPL-3.0 upstream
-  code. Unlike QUANT it is supervised: `Pulsar().fit(batches)` needs labels,
-  and it is wired into `experiment.py` only (`--transform pulsar`).
+  code. Unlike QUANT it is supervised: `Pulsar().fit(batches)` needs labels.
+  `--transform pulsar` selects it in `experiment.py` and `scripts/stream_full.py`
+  (the latter fits it in one labelled pass over `--fit-rows` first).
 - `fit2082/results.py`: shared result-file schema
   (`{commit, dataset, device, split, transform, models: {...}}`) and
   GPU/host memory probes. The notebooks read these files.

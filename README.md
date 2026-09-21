@@ -46,6 +46,31 @@ Tiselac 27,346 and LenDB 44,253. At 65,536 rows these would be 6.7 GB and
 10.8 GB, so they will not fit in `experiment.py`'s device cache without a lower
 `top_percent`, and neither has been run.
 
+#### Streaming
+
+`scripts/stream_full.py --transform pulsar` fits PULSAR in one labelled pass
+over the reference run's 65,536 training rows (`--fit-rows`), then transforms
+each streamed batch like QUANT. Only one batch is on the device at a time,
+which is also how Tiselac and LenDB can run at all. The cost is recomputed
+every epoch. Measured per 4,096-row batch, one timed call each on random
+data of each dataset's shape:
+
+| dataset | PULSAR | QUANT | peak GPU |
+| --- | ---: | ---: | ---: |
+| Pedestrian / Traffic | 98 ms | 34 ms | 235 MB |
+| Tiselac | 698 ms | 44 ms | 1,024 MB |
+| InsectSound | 2,735 ms | 142 ms | 597 MB |
+| LenDB | 7,104 ms | 150 ms | 1,544 MB |
+
+Traffic streams at about 28 s of transform per epoch over its 1,160,582 rows.
+LenDB would take about 28 minutes per epoch, roughly 2.4 hours for the 5-epoch
+stream that takes 6 minutes with QUANT. The port computes every local feature
+and then keeps 40%, so computing only the kept ones (as upstream does at test
+time) is the obvious speed-up. It has not been profiled.
+
+    uv run python scripts/stream_full.py --dataset Traffic --transform pulsar \
+        --epochs 10 --compile
+
 #### Faithfulness of the port
 
 Checked once in scratch against upstream's own code (numba, statsmodels 0.14);
