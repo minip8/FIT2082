@@ -20,7 +20,7 @@ of the design (chunking, streaming, page-cache eviction).
 
 Everything runs through `uv` (Python 3.12).
 
-    uv run pytest                                   # 125 tests; CUDA-only ones skip without a GPU
+    uv run pytest                                   # 153 tests; CUDA-only ones skip without a GPU
     uv run pytest tests/test_boost.py::test_name    # single test
     uv run ruff check . && uv run ruff format .
     uv run ty check
@@ -78,6 +78,9 @@ Also:
   Change the tests only as a deliberate decision.
 - `fit2082/quant/quant.py`: QUANT transform (third-party research code, adapted
   for torch). `fit2082/demo/utils.py` has `Dataset`, the memmapped `.npy` loader.
+- `fit2082/pulsar/pulsar.py`: PULSAR transform, a torch port of GPL-3.0 upstream
+  code. Unlike QUANT it is supervised: `Pulsar().fit(batches)` needs labels,
+  and it is wired into `experiment.py` only (`--transform pulsar`).
 - `fit2082/results.py`: shared result-file schema
   (`{commit, dataset, device, split, transform, models: {...}}`) and
   GPU/host memory probes. The notebooks read these files.

@@ -2,6 +2,72 @@
 
 ## Benchmarks
 
+### pulsar
+
+PULSAR (Cabello & Kulik, ICDM 2025) as a second feature transform, ported to
+torch in `fit2082/pulsar/pulsar.py` and selected with `--transform pulsar`.
+It is supervised: the Fisher-score selection is fitted on every training batch
+and nothing else. Train and validation rows are the same as in every QUANT
+sweep, so the two transforms are compared on identical rows. Sweeps for any
+transform other than QUANT are written to `results/{dataset}-{transform}-sweep-{commit}.json`.
+
+    uv run python -m fit2082.boost.experiment --dataset InsectSound --num-train 32768 \
+        --transform pulsar --seeds 3 --compile --variants baseline,sampled_pairs
+
+3 seeds, compiled. The two transforms ran as back-to-back invocations (one
+`load_split` each):
+
+| dataset | variant | QUANT | PULSAR |
+| --- | --- | ---: | ---: |
+| InsectSound | `baseline` | 0.2699 +- 0.0094 | **0.2262 +- 0.0044** |
+| | `sampled_pairs` | 0.2625 +- 0.0030 | **0.2258 +- 0.0028** |
+| Pedestrian | `baseline` | **0.2326 +- 0.0059** | 0.2481 +- 0.0034 |
+| | `sampled_pairs` | **0.2213 +- 0.0066** | 0.2393 +- 0.0037 |
+
+* **InsectSound: -0.044**, the biggest single gain in this log. It beats
+  ANOVA-F weighting of QUANT's features (-0.027 to -0.036 in the screen) and
+  closes about half the gap to XGBoost's 0.189. Sampled pairs add nothing on
+  top of it.
+* **Pedestrian: +0.016 to +0.018**, several times the noise floor. Pedestrian
+  is the dataset F weighting did not move either. One untested explanation
+  is dilution: HashBoost draws features uniformly, and PULSAR offers 3,000
+  columns against QUANT's 212.
+
+Cost. The transform is a one-off setup cost, and features stay cached on the
+device:
+
+| dataset | features (QUANT) | transform (QUANT) | peak GPU | fit wall |
+| --- | --- | ---: | ---: | ---: |
+| InsectSound | 14,811 (5,470) | 48.2s (1.9s) | 2,650 MB | 3.5s |
+| Pedestrian | 3,000 (212) | 3.3s (0.9s) | 1,154 MB | 9.4s |
+
+Feature counts at upstream's defaults, with 40% of local features kept:
+Tiselac 27,346 and LenDB 44,253. At 65,536 rows these would be 6.7 GB and
+10.8 GB, so they will not fit in `experiment.py`'s device cache without a lower
+`top_percent`, and neither has been run.
+
+#### Faithfulness of the port
+
+Checked once in scratch against upstream's own code (numba, statsmodels 0.14);
+the repo does not keep that oracle, and `tests/test_pulsar.py` checks against
+transcriptions of upstream's loops instead.
+
+* Feature counts are identical for every representation, for lengths 24, 60
+  and 150. The batched Burg recursion matches `statsmodels.burg` to 5e-8. The
+  histogram median and IQR match upstream exactly on 200k rows.
+* Global features agree column-for-column to 1e-4. The exception is
+  near-constant partitions, where upstream reports a stdev of ~0.006 that is
+  rounding noise: it squares float32 values before its float64 subtraction.
+  The port computes centred moments and returns 0 there.
+* About 0.5% of local features differ, all at ties: a histogram bin boundary,
+  a mean-crossing, or a stdev threshold, reached through last-bit differences
+  in the float32 statistics.
+
+Departures from upstream, all deliberate and listed in the module docstring:
+multivariate input is handled channel by channel, as QUANT does; the Fisher
+score and scaler are accumulated over batches; and the AR order is clamped to
+`length - 2`.
+
 ### hashboost-screen
 
 A profile of `fit_batch`, three changes it led to, and a screen of about 30
