@@ -27,7 +27,7 @@ Everything runs through `uv` (Python 3.12).
 
     uv run python scripts/fetch_datasets.py ...     # MONSTER data from Hugging Face into data/
     uv run python -m fit2082.boost.experiment --list
-    uv run python -m fit2082.boost.experiment --dataset Pedestrian --seeds 3 --compile \
+    uv run python -m fit2082.boost.experiment --dataset Pedestrian --seeds 1 --compile \
         --variants baseline,capacity_2
     uv run python -m fit2082.boost.benchmark        # torch vs numba reference
     uv run python scripts/stream_full.py --dataset LenDB --model hashboost --epochs 5
@@ -98,8 +98,10 @@ Data layout: `data/<Name>/<Name>_X.npy`, `<Name>_y.npy`,
 
 - Run-to-run sd on Pedestrian is about 0.003, and seeds do not make reruns
   reproducible (leaf values are chaotic). Always rerun `baseline` **in the same
-  sweep** and report mean +- sd over several seeds. Where a change does not
-  alter training, prefer paired comparisons.
+  sweep**. Where a change does not alter training, prefer paired comparisons.
+- When Claude runs sweeps, use `--seeds 1` (the user reruns with more seeds
+  when a result matters). Say that a number comes from one seed, and do not
+  read a gap under ~0.006 on Pedestrian as a result.
 - Quote validation error against `X_va`. Anything chosen after training
   (early stopping, readout `lam`) must use the separate `X_tune` slice.
 - Keep train and validation splits byte-identical to earlier runs (fixed seed
