@@ -48,9 +48,12 @@
     on five MONSTER datasets and on the 112 standard UCR datasets. On UCR,
     default HashBoost is statistically level with default XGBoost (mean ranks
     2.36 and 2.39) and clearly behind QUANT's own ExtraTrees classifier (1.25).
-    It beats XGBoost on small training sets and trails both on the largest. On
-    MONSTER it is 0.013 to 0.083 behind the best tree ensemble, and fits in
-    seconds where XGBoost takes minutes. Streaming the 975,291-row LenDB
+    It beats XGBoost on small training sets and trails both on the largest.
+    Fewer bits per round and more rounds, chosen by cross-validation over
+    datasets, cut its mean error from 0.196 to 0.165. That is significantly
+    ahead of XGBoost (0.210) and still behind ExtraTrees (0.148). On MONSTER
+    default HashBoost is 0.013 to 0.083 behind the best tree ensemble, and fits
+    in seconds where XGBoost takes minutes. Streaming the 975,291-row LenDB
     training pool, HashBoost's peak GPU memory is the same as at 65,536 rows
     (2.6\,GB), while XGBoost's binned matrix grows linearly to 14.6\,GB.
     HashBoost's limit is the number of rounds it can afford, not memory: every
@@ -656,6 +659,63 @@ not a ceiling. HashBoost reaches zero training error on 111 of the 112
 datasets, yet its mean test error keeps falling, from 0.202 at 400 rounds to
 0.194 at 800. This was recorded for plotting only, and nothing was chosen on it.
 
+\paragraph{Bits and rounds.}
+The default bit width and budget were set on MONSTER, where each of a round's
+256 buckets sees thousands of rows. Most UCR training sets cannot fill them.
+\Cref{tab:ucr-grid} varies both, with one run per cell and the default rerun
+in the same sweep as the control. The rerun moved the mean error by 0.0015
+(0.1941 to 0.1956), with no systematic direction (Wilcoxon $p = 0.21$). Every
+other cell beats the control, with Holm-adjusted Wilcoxon $p \le 5.2\times10^{-7}$.
+Fewer bits help at both budgets. More rounds help at every width, and most at
+two bits, where each round is the weakest learner. The best width grows with
+the training set (\cref{fig:ucr-bits}), as the bucket argument predicts: at
+3,200 rounds two bits is best below 1,000 training rows and four bits above.
+The gain from fewer bits is larger where there are fewer training rows per
+class ($r = -0.34$ against $\log n/k$).
+
+% src: notebooks/ucr.ipynb, the grid cells, over results/UCR/*-eb898d0.json
+\begin{table}[t]
+    \centering
+    \caption{UCR 112: HashBoost's mean test error by bits per round and round
+        budget, one run per cell. The default (8 bits, 800 rounds) was rerun
+        in the same sweep. It is a sensitivity study on the test sets, so the
+        best cell's own figure is optimistic; see the text for a choice made
+        without reading the scored test sets.}
+    \label{tab:ucr-grid}
+    \begin{tabular}{rrr}
+        \toprule
+        bits        & 800 rounds       & 3,200 rounds    \\
+        \midrule
+        8 (default) & 0.1956 (control) & 0.1885          \\
+        6           & 0.1844           & 0.1808          \\
+        4           & 0.1767           & 0.1712          \\
+        2           & 0.1750           & \textbf{0.1647} \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.78\linewidth]{figures/ucr_bits_rounds.pdf}
+    \caption{HashBoost's mean test error against bits per round, by
+        training-set size, at 800 and 3,200 rounds. Each panel has its own
+        vertical scale. The best width falls from four bits to two as the
+        training sets shrink.}
+    \label{fig:ucr-bits}
+\end{figure}
+
+A grid scored on test sets cannot also choose its own winner, so we choose a
+cell by two-fold cross-validation over datasets. The cell is picked on a random
+half of the datasets and scored on the other half, both ways round. Both halves
+choose two bits and 3,200 rounds. Chosen that way, HashBoost is significantly
+ahead of default XGBoost: its error is lower on 82 datasets and higher on 29
+($p = 4.5\times10^{-8}$). It is still behind ExtraTrees, lower on 28 and higher
+on 63 ($p = 1.2\times10^{-5}$), but the gap in mean error falls from 0.048 to
+0.017. The bits are free. On sets this small, fit time is per-round overhead
+rather than arithmetic, and the 800-round cells take 179--188\,s over all 112
+datasets whatever the width. The extra rounds are not: the 3,200-round cells
+take 7.5 times as long, against 70\,s for ExtraTrees on the CPU.
+
 \subsection{Training cost and scaling with instances (RQ2)}
 \label{sec:scaling}
 
@@ -882,6 +942,11 @@ on training sets of a few hundred rows or fewer. It is not level with the
 strongest classifier for the same features: QUANT's ExtraTrees ranks
 significantly higher and has the lower error on 96 of the 112 datasets. On
 MONSTER, default HashBoost is 0.013--0.083 behind the best tuned tree model.
+On UCR, two settings close most of the gap to ExtraTrees: fewer bits, so that
+small training sets fill their buckets, and more rounds. With two bits and
+3,200 rounds, chosen by cross-validation over datasets, HashBoost is
+significantly ahead of XGBoost and 0.017 behind ExtraTrees in mean error,
+though still significantly behind it.
 On Pedestrian, a bagged ensemble with a refitted readout reached XGBoost's
 validation error, though only on the earlier split. So the tree can be
 replaced at a cost in accuracy, and how large that cost is depends on the
@@ -912,10 +977,11 @@ run is dominated by the feature transform and I/O, not the model.
           30 resamples.
     \item The Pedestrian exploration was run on an earlier split, so its
           comparison with XGBoost crosses splits (\cref{sec:setup}).
-    \item On UCR every model runs at fixed settings. HashBoost's 800 rounds
-          are not a ceiling (its test error was still falling), and the
-          baselines are at library defaults, which suits ExtraTrees better
-          than XGBoost.
+    \item On UCR every model runs at fixed settings, and the baselines are at
+          library defaults, which suits ExtraTrees better than XGBoost. The
+          bits-and-rounds grid is scored on test sets. The cross-validated
+          choice over datasets never reads the test set it is scored on, but
+          it still reads the other half's.
     \item The MONSTER tree baselines use one fixed configuration each and were
           not tuned. Their early stopping selects on validation, which favours
           them.
@@ -923,9 +989,10 @@ run is dominated by the feature transform and I/O, not the model.
 \end{itemize}
 
 \paragraph{Future work.}
-On small datasets: fewer bits (256 buckets for a 20-row training set leaves
-most of them empty), a round budget chosen on rows held out from training, and
-bagging, which paid on Pedestrian. More generally: feature weighting or a lower
+On small datasets: a bit width chosen per dataset from its rows per class,
+rather than one width for all; cheaper rounds, since at UCR sizes a round's
+cost is overhead, which would make budgets past 3,200 affordable; one-bit
+rounds (stumps); and bagging, which paid on Pedestrian. More generally: feature weighting or a lower
 PULSAR \code{top\_percent} for HashBoost; batching QUANT's per-interval quantile
 calls, now the dominant cost of a streamed run; and understanding the chaotic
 leaf dynamics, which would reduce the noise floor that limits every comparison
@@ -938,9 +1005,11 @@ HashBoost replaces the decision tree in gradient boosting with a random global
 partition: $b$ threshold predicates, drawn from pairs of hard examples, that
 index a table of Newton-step leaves refined by every later mini-batch. It does
 no split search and never holds the training set. At its defaults it is
-level with default XGBoost across the 112 UCR datasets, and ahead of it on
-small training sets. It trails QUANT's ExtraTrees significantly, and it trails
-the best tuned tree ensemble on MONSTER by 0.01 to 0.08. It fits in seconds, and
+level with default XGBoost across the 112 UCR datasets. With fewer bits per
+round, so that small training sets fill their buckets, and more rounds, it is
+significantly ahead of XGBoost and within 0.017 of QUANT's ExtraTrees in mean
+error, though still significantly behind it. On MONSTER it trails the best
+tuned tree ensemble by 0.01 to 0.08. It fits in seconds, and
 its memory use is flat from 65,536 to nearly a million rows. The cost that
 limits it is the number of rounds, which round freezing reduces from quadratic
 to linear.
@@ -956,10 +1025,11 @@ to linear.
     \item \textbf{More runs.} Every new number here is one run: rerun the
           MONSTER defaults (Pedestrian's two runs differ by 0.010) and the UCR
           112 with several seeds or resamples.
-    \item \textbf{Freeze one configuration.} The default model is the one
-          evaluated so far. Decide whether a cheap variant (fewer bits on
-          small sets, bagging, a longer budget chosen on held-out training
-          rows) should replace it before the final benchmark.
+    \item \textbf{Freeze one configuration.} On UCR, two bits and 3,200
+          rounds beat the default everywhere below 1,000 training rows. Four
+          bits won above that, where MONSTER's defaults were tuned. Decide
+          whether the final benchmark uses one width or a width derived from
+          rows per class, and check the choice on MONSTER.
     \item \textbf{Consolidated benchmark.} Five datasets $\times$ \{HashBoost
           default, HashBoost final, XGBoost, LightGBM, CatBoost\}. Report error,
           wall time and peak GPU memory, with several runs per cell and the
