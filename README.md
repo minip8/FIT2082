@@ -146,18 +146,81 @@ LenDB, 5 epochs, one run each:
   now unmaps too. Its ellpack pages are still flushed and evicted every
   `--drop-cache-every` batches. It has not been re-measured.
 
+#### More rounds per pass (`90ae0f3`)
+
+Whole-pool LenDB underfit: its training error (about 0.06) sat close to its
+validation error (0.073), where the 65,536-row run memorised its rows. Rounds
+are now cheap next to a pass over the data, so this adds rounds per batch
+(`--hashes-per-round`) rather than passes, with a 2-epoch frozen window
+(`--active-epochs 2`) to keep the extra rounds' cost bounded. One run per arm,
+8 bits, compiled:
+
+    uv run python scripts/stream_full.py --dataset LenDB --model hashboost --epochs 5 --compile \
+        --active-epochs 2 --hashes-per-round 4 --label h4_w2
+
+Errors are means of the last seven evaluations. The noise floor is today's
+other runs of the control: nine on LenDB at 0.0730 +- 0.0021 (0.0683-0.0756),
+and five on Traffic at 0.3902 +- 0.0032.
+
+| LenDB, 975,291 rows | rounds per batch | window | epochs | hashes | wall | `fit_batch` | val error | train error |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| control | 1 | none | 5 | 1,195 | 174s | 13s | 0.0703 | 0.0588 |
+| | 1 | 2 epochs | 5 | 1,195 | 183s | 12s | 0.0750 | 0.0594 |
+| | 2 | 2 epochs | 5 | 2,390 | 183s | 16s | 0.0599 | 0.0424 |
+| | 4 | 2 epochs | 5 | 4,780 | 219s | 26s | 0.0494 | 0.0254 |
+| | 8 | 2 epochs | 5 | 9,560 | 236s | 65s | **0.0461** | 0.0153 |
+| | 1 | 2 epochs | 10 | 2,390 | 358s | 22s | 0.0613 | 0.0392 |
+| HashBoost, 65,536 rows (`96c9e18`) | 1 | none | 75 | 1,200 | | | 0.0546 | 0.0065 |
+| XGBoost, 65,536 rows (`6205faa`) | | | | | | | 0.0465 | 0.0240 |
+
+| Traffic, 1,160,582 rows | rounds per batch | window | epochs | hashes | wall | `fit_batch` | val error | train error |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| control | 1 | none | 10 | 2,840 | 44s | 23s | 0.3910 | 0.3450 |
+| | 1 | 2 epochs | 10 | 2,840 | 40s | 17s | 0.3935 | 0.3376 |
+| | 2 | 2 epochs | 10 | 5,680 | 57s | 33s | 0.3525 | 0.2584 |
+| | 4 | 2 epochs | 10 | 11,360 | 115s | 89s | 0.3171 | 0.1809 |
+| | 8 | 2 epochs | 10 | 22,720 | 347s | 317s | **0.3034** | 0.1255 |
+
+* **More rounds per batch pay, by far more than the noise.** On LenDB, four
+  rounds per batch cut validation error by 0.021 against the control, ten
+  times the noise, for 45 s more wall time. That beats the 65,536-row
+  HashBoost run (0.0546), and eight rounds (0.0461) are level with XGBoost on
+  65,536 rows. From four to eight rounds the gain shrinks to 0.0033, about
+  1.5 sd. Traffic falls from 0.391 to 0.317 at four rounds and 0.303 at eight.
+* **Training error falls with validation error,** so the whole pool was bound
+  by capacity, as `streaming-baselines` guessed.
+* **A round per batch is worth about as much as a pass, at half the cost.**
+  Two rounds per batch over five epochs (0.0599) and one round over ten
+  (0.0613) both train 2,390 hashes and land within noise of each other. The
+  first takes 183 s against 358 s, because the stream's cost is the pass.
+* **The cost depends on what bounds the stream.** LenDB is bound by QUANT, so
+  eight rounds cost 1.36x the control's wall time. Traffic is bound by the
+  model, so they cost 7.9x, and its peak GPU memory rose from 1.4 to 3.9 GB.
+  On Traffic, four rounds are the better trade.
+* **The 2-epoch window alone** read 0.0750 against the control's 0.0703. That
+  gap is inside the spread of the day's nine control runs, and on Traffic the
+  window cut `fit_batch` from 23 to 17 s.
+* **Not a like-for-like win over trees.** No tree model has been trained on a
+  whole pool except LenDB's three-round XGBoost (best 0.0627, in
+  `streaming-baselines`). On Traffic's validation rows, LightGBM and XGBoost
+  trained on 65,536 rows score 0.385-0.396 and 0.399-0.410.
+* **Caveat:** `hashes_per_round` also counts each batch H times into the older
+  rounds ("Also measured" in `hashboost-screen`), so the gain is not all from
+  having more hashes.
+
 #### What is left
 
-* **LenDB is bound by QUANT's sort:** 139 ms of a 150 ms batch. A Triton
-  kernel that sorts each window in a power-of-two block would avoid PyTorch's
-  fixed 1,024-slot cost, but it would be a second code path to keep in step
-  with upstream.
-* **Traffic is bound by the model:** per batch, 8.5 ms of `fit_batch` against
-  7 ms of QUANT and under 1 ms of reading. At `157e54d` a 2-epoch frozen window
-  cut `fit_batch` from 29 to 20 s, at no measurable cost.
-* **A pass over whole-pool LenDB now takes about 38 s**, so more rounds per
-  pass (item 3 in the handoff, for a pool that underfits) costs about three
-  minutes a run.
+* **LenDB is bound by QUANT's sort:** 139 ms of a 150 ms batch, however many
+  rounds it trains. A Triton kernel that sorts each window in a power-of-two
+  block would avoid PyTorch's fixed 1,024-slot cost, but it would be a second
+  code path to keep in step with upstream.
+* **With several rounds per batch, Traffic is bound by the model:** eight
+  rounds spend 317 of 347 s in `fit_batch`. There the per-round cost from
+  `cheaper-rounds` matters again, as do a narrower frozen window and CUDA
+  graphs.
+* **Where the rounds gain comes from.** A variant that adds H hashes per batch
+  but counts the batch into old rounds once would separate more hashes from
+  more updates. So would 8 rounds per batch on more seeds.
 
 ### cheaper-rounds
 
