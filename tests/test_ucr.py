@@ -146,6 +146,20 @@ def test_hashboost_cycles_its_batches_to_exactly_the_budget():
     )
 
 
+@pytest.mark.parametrize("num_bits", [2, 4])
+def test_hashboost_takes_its_bit_width(num_bits):
+
+    Z = torch.randn(12, 5)
+    y = _two_classes_per_batch(12, 12)
+
+    entry = fit_hashboost(
+        Z, y, Z, y, num_classes=2, rounds=3, device="cpu", num_bits=num_bits
+    )
+
+    assert entry["params"]["num_bits"] == num_bits
+    assert entry["params"]["rounds"] == 3
+
+
 def test_a_single_class_batch_raises_rather_than_hanging():
 
     # one row per batch is one class per batch, which HardPairSplitter could

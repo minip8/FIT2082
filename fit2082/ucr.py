@@ -248,13 +248,18 @@ def fit_hashboost(
     compile: bool = False,
     curve_every: int = 50,
     seed: int = SEED,
+    num_bits: int = 8,
 ) -> dict[str, Any]:
-    """Default HashBoost, trained for exactly `rounds` rounds.
+    """HashBoost at the default lr, trained for exactly `rounds` rounds.
 
     The fixed batches are cycled until the budget is spent, so a set that fits
     in one batch is re-accumulated every round, and one of 8,926 rows (three
     batches) stops part-way through its last pass. The test curve is recorded
     for plotting only; the reported error is the one at `rounds`.
+
+    `num_bits` is the one model setting exposed: at the default 8, a round has
+    256 buckets, far more than a UCR training set of a few dozen rows can
+    fill.
     """
 
     y_tr_d = torch.as_tensor(y_tr, device=device)
@@ -265,7 +270,11 @@ def fit_hashboost(
     torch.manual_seed(seed)
 
     model = HashBoost(
-        num_classes=num_classes, max_num_hashes=rounds, device=device, compile=compile
+        num_classes=num_classes,
+        num_bits=num_bits,
+        max_num_hashes=rounds,
+        device=device,
+        compile=compile,
     )
 
     if device.startswith("cuda"):
