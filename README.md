@@ -2,6 +2,107 @@
 
 ## Benchmarks
 
+### faster-streams
+
+In a whole-pool stream the model is the small part. At `157e54d`, QUANT took
+206 s of a 370 s LenDB stream and 121 s of a 154 s Traffic stream, and reading
+the memmap took most of the rest. This branch starts with QUANT. One run per
+stream and commit:
+
+    uv run python scripts/stream_full.py --dataset Traffic --model hashboost --epochs 10 --compile
+    uv run python scripts/stream_full.py --dataset LenDB --model hashboost --epochs 5 --compile
+
+Validation error is the mean of the last seven evaluations, as in "Frozen rounds
+in a streamed run": on 4,096 rows, consecutive evaluations differ by up to 0.01.
+
+| stream | commit | wall | read | QUANT | `fit_batch` | val error |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Traffic, 10 epochs, 1,160,582 rows | `157e54d` | 154s | 2s | 121s | 29s | 0.3922 |
+| | `7993335` | 154s | 2s | 122s | 27s | 0.3853 |
+| | `dd69128` | **41s** | 2s | **17s** | 21s | 0.3916 |
+| LenDB, 5 epochs, 975,291 rows | `157e54d` | 370s | 149s | 206s | 13s | 0.0745 |
+| | `7993335` | 366s | 148s | 205s | 13s | 0.0683 |
+| | `dd69128` | **302s** | 140s | **149s** | 11s | 0.0730 |
+
+* **`cheaper-rounds` left the streams where they were.** At `7993335` the
+  stage times are within a few seconds of `157e54d`'s. The model was already
+  under a fifth of the wall time.
+* **Traffic is 3.8x faster end to end.** QUANT fell from 43 to 6 ms per batch.
+  The model is now the largest stage: 21 s of 41. `fit_batch` took 21 s
+  against 27 s, doing the same work on bit-identical features. With one run
+  each, that drop is unexplained.
+* **LenDB is 1.2x faster.** In the stream, QUANT fell from 171 to 125 ms
+  per batch; that stage also copies the batch to the device. The validation
+  error, 0.0730 against 0.0683, is within the noise. Peak GPU use rose from
+  2,572 to 2,765 MB. The transform's peak allocation grew only 13 MB, but its
+  larger blocks leave the caching allocator holding 191 MB more. Traffic's
+  barely moved (1,380 to 1,383 MB).
+
+#### QUANT: one sort per window length (`dd69128`)
+
+`IntervalModel` called `f_quantile` once per interval: 480 `torch.quantile`
+calls per LenDB batch and 152 per Traffic batch, each a sort and about twenty
+small kernels. The intervals come in few lengths, though: 9-11 per
+representation on LenDB and 6-8 on Traffic. `fit` now groups them by length.
+`transform` gathers every window of one length, sorts them in one call,
+interpolates the quantiles and writes each column where upstream's layout put
+it.
+
+Per 4,096-row batch, paired in one process (median of five after two
+warm-ups):
+
+| dataset | series | upstream | grouped | speed-up |
+| --- | --- | ---: | ---: | ---: |
+| Traffic | 1 x 24 | 32.0 ms | 5.9 ms | 5.4x |
+| Pedestrian | 1 x 24 | 34.7 ms | 4.6 ms | 7.6x |
+| Tiselac | 10 x 23 | 39.2 ms | 16.0 ms | 2.5x |
+| InsectSound | 1 x 600 | 128.1 ms | 37.0 ms | 3.5x |
+| LenDB | 3 x 540 | 142.9 ms | 114.3 ms | 1.3x |
+
+Across all 112 UCR training sets, QUANT goes from 16.6 s to 1.6 s. Peak
+allocation per batch is at most 13 MB higher (LenDB).
+
+* **Short series were bound by launches and host syncs.** Every interval of
+  two to four samples built its quantile position on the host
+  (`torch.tensor([0.5], device=...)`). That is a blocking copy, and a Traffic
+  batch had 82 of them. The grouped transform makes none, so the host can
+  queue the next kernels while the GPU runs.
+* **LenDB is bound by the sort itself, and grouping cannot change that.**
+  Sorting is 55% of its GPU time. PyTorch sorts any window of 129 to 1,024
+  samples in a fixed 1,024-slot kernel, so a 135-sample window costs as much as
+  a 540-sample one. Per representation, the seven 135-sample windows take
+  9.1 ms against 2.0 ms for the one 540-sample window. Grouping reduces the
+  number of calls, not the number of windows sorted.
+* **The quantiles are bit-identical to upstream's** on every UCR 112 training
+  set and on MONSTER. The window mean subtracted from the odd quantiles is
+  summed in a different order, and lands up to 4 ulps of the window's largest
+  value away. In absolute terms that reaches 1.6e-2, on HouseTwenty's FFT
+  magnitudes, which run to 2.8e6: two ulps of an 8.4e4 feature. Traffic,
+  Pedestrian and Tiselac come out bit-identical, and
+  `tests/test_quant.py` holds `IntervalModel` to `f_quantile`.
+* **What did not pay:**
+  * **`torch.compile`** can sort windows of up to 512 samples in a Triton
+    kernel, but it was still compiling LenDB's 41 window shapes after 25
+    minutes, and every series length brings its own.
+  * **`torch.quantile` itself.** Interpolating by hand gives the same
+    quantiles without its NaN checks and rank bookkeeping: 141 to 118 ms on
+    LenDB, and 44 to 39 ms on InsectSound.
+
+#### What is left
+
+* **LenDB now spends as long reading as transforming:** per batch, 117 ms of
+  memmap reads against 125 ms of QUANT and 10 ms of `fit_batch`. Reading uses
+  the CPU and disk and QUANT uses the GPU, so they can overlap: a background
+  thread reads batch i+1 while the GPU works on batch i (item 1 in the
+  handoff). A batch would then cost about the larger of the two, roughly
+  135 ms, or 160-170 s for five epochs instead of 302 s. That is an estimate.
+* **Traffic is bound by the model again:** per batch, 7.3 ms of `fit_batch`
+  against 6 ms of QUANT and 0.5 ms of reading. At `157e54d` a 2-epoch frozen
+  window cut `fit_batch` from 29 to 20 s, at no measurable cost.
+* **LenDB's QUANT would need a different sort.** A Triton kernel that sorts
+  each window in a power-of-two block would avoid the fixed 1,024-slot cost,
+  but it would be a second code path to keep in step with upstream.
+
 ### cheaper-rounds
 
 The UCR grid made the cost of a round the bottleneck: a 3,200-round cell took
