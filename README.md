@@ -6,8 +6,8 @@
 
 In a whole-pool stream the model is the small part. At `157e54d`, QUANT took
 206 s of a 370 s LenDB stream and 121 s of a 154 s Traffic stream, and reading
-the memmap took most of the rest. This branch starts with QUANT. One run per
-stream and commit:
+the memmap took most of the rest. This branch takes QUANT first, then the
+reads. One run per stream and commit:
 
     uv run python scripts/stream_full.py --dataset Traffic --model hashboost --epochs 10 --compile
     uv run python scripts/stream_full.py --dataset LenDB --model hashboost --epochs 5 --compile
@@ -15,14 +15,16 @@ stream and commit:
 Validation error is the mean of the last seven evaluations, as in "Frozen rounds
 in a streamed run": on 4,096 rows, consecutive evaluations differ by up to 0.01.
 
-| stream | commit | wall | read | QUANT | `fit_batch` | val error |
+| stream | commit | wall | read (waited on) | QUANT | `fit_batch` | val error |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
 | Traffic, 10 epochs, 1,160,582 rows | `157e54d` | 154s | 2s | 121s | 29s | 0.3922 |
 | | `7993335` | 154s | 2s | 122s | 27s | 0.3853 |
 | | `dd69128` | **41s** | 2s | **17s** | 21s | 0.3916 |
+| | `27214a6` | 46s | 3s (0s) | 20s | 24s | 0.3918 |
 | LenDB, 5 epochs, 975,291 rows | `157e54d` | 370s | 149s | 206s | 13s | 0.0745 |
 | | `7993335` | 366s | 148s | 205s | 13s | 0.0683 |
-| | `dd69128` | **302s** | 140s | **149s** | 11s | 0.0730 |
+| | `dd69128` | 302s | 140s | **149s** | 11s | 0.0730 |
+| | `27214a6` | **188s** | 41s (**6s**) | 165s | 14s | 0.0756 |
 
 * **`cheaper-rounds` left the streams where they were.** At `7993335` the
   stage times are within a few seconds of `157e54d`'s. The model was already
@@ -88,20 +90,74 @@ allocation per batch is at most 13 MB higher (LenDB).
     quantiles without its NaN checks and rank bookkeeping: 141 to 118 ms on
     LenDB, and 44 to 39 ms on InsectSound.
 
+#### Reading behind the GPU (`73b696b`, `27214a6`)
+
+`--prefetch` (default 1) reads the next batch in a background thread while the
+GPU trains on the current one, and `--prefetch 0` restores the serial loop.
+NumPy releases the GIL while it copies rows out of the memmap, so a plain
+thread is enough. The batches are the serial ones, row for row
+(`tests/test_stream.py`). `read_s` is still the time spent reading, and the new
+`read_wait_s` is the part of it the training loop waited for.
+
+On its own it saved 18 s of LenDB's 302, because the reads came in bursts. The
+page cache was evicted every 50 batches. With the disk's 8 MB of readahead and
+a batch's rows about 2 MB apart, the first batch after each eviction re-read
+6.3 GB, nearly the whole pool, in 4.4-5.8 s. The five batches after each
+eviction held 83% of an epoch's reading, and the prefetched run still waited on
+113 of its 150 s of reading.
+
+The eviction came in after a watchdog killed a run over low MemFree
+(`9f95d78`). It never kept MemFree up: the next batch refilled the cache, so
+MemFree sat at the same ~120 MB floor with or without it, and peak RSS was no
+lower. `27214a6` only unmaps every 50 batches (`MADV_DONTNEED`, which drops our
+page table entries and keeps the pages cached). It still evicts once at
+startup, so every run starts cold. One epoch of reads:
+
+| every 50 batches | reading | read from disk | RSS | MemFree, median |
+| --- | ---: | ---: | --- | ---: |
+| evict (before) | 37.3 s | 39.5 GB | cycles 0.6-6.5 GB | 122 MB |
+| **unmap (now)** | **11.0 s** | **6.5 GB** | median 4.8 GB, max 6.2 | 123 MB |
+| nothing | 10-14 s | 7.4-12.9 GB | median 6.7 GB | 118-122 MB |
+
+LenDB, 5 epochs, one run each:
+
+| commit | page cache | `--prefetch` | wall | reading | waited on | val error |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `73b696b` | evict every 50 | 0 | 302s | 140s | 140s | 0.0731 |
+| | | 1 | 284s | 150s | 113s | 0.0722 |
+| | | 2 | 283s | 142s | 106s | 0.0728 |
+| | never evict | 0 | 205s | 36s | 36s | 0.0741 |
+| | | 1 | 179s | 29s | 8s | 0.0751 |
+| `27214a6` | unmap every 50 | 0 | 203s | 33s | 33s | 0.0726 |
+| | | 1 | **188s** | 41s | **6s** | 0.0756 |
+
+* **LenDB is now bound by the GPU:** per batch, 139 ms of QUANT and 12 ms of
+  `fit_batch`. Prefetching hides all but 6 s of the reading, but beside the
+  reader thread the transform stage slowed from 156 to 165 s, so it nets 15 s.
+* **Traffic does not change.** Its 140 MB of series stay cached and take 2-3 s
+  to read either way: 40 s prefetched or not at `73b696b`. At `27214a6`,
+  46 s, with transform and fit both slower, which is run-to-run variation.
+* **Reading only the rows needed does not pay on this disk.** In a scratch
+  benchmark, `preadv` from 8 threads read 27 MB per batch against the memmap's
+  142 MB, but took 176 ms per batch against 143 over a full epoch, with the
+  old evictions. The virtual disk tops out near 23,000 random reads a second,
+  and 16 threads were slower than 8, so io_uring would not help either.
+* **The xgboost runner reads its input through the same `RawStream`**, so it
+  now unmaps too. Its ellpack pages are still flushed and evicted every
+  `--drop-cache-every` batches. It has not been re-measured.
+
 #### What is left
 
-* **LenDB now spends as long reading as transforming:** per batch, 117 ms of
-  memmap reads against 125 ms of QUANT and 10 ms of `fit_batch`. Reading uses
-  the CPU and disk and QUANT uses the GPU, so they can overlap: a background
-  thread reads batch i+1 while the GPU works on batch i (item 1 in the
-  handoff). A batch would then cost about the larger of the two, roughly
-  135 ms, or 160-170 s for five epochs instead of 302 s. That is an estimate.
-* **Traffic is bound by the model again:** per batch, 7.3 ms of `fit_batch`
-  against 6 ms of QUANT and 0.5 ms of reading. At `157e54d` a 2-epoch frozen
-  window cut `fit_batch` from 29 to 20 s, at no measurable cost.
-* **LenDB's QUANT would need a different sort.** A Triton kernel that sorts
-  each window in a power-of-two block would avoid the fixed 1,024-slot cost,
-  but it would be a second code path to keep in step with upstream.
+* **LenDB is bound by QUANT's sort:** 139 ms of a 150 ms batch. A Triton
+  kernel that sorts each window in a power-of-two block would avoid PyTorch's
+  fixed 1,024-slot cost, but it would be a second code path to keep in step
+  with upstream.
+* **Traffic is bound by the model:** per batch, 8.5 ms of `fit_batch` against
+  7 ms of QUANT and under 1 ms of reading. At `157e54d` a 2-epoch frozen window
+  cut `fit_batch` from 29 to 20 s, at no measurable cost.
+* **A pass over whole-pool LenDB now takes about 38 s**, so more rounds per
+  pass (item 3 in the handoff, for a pool that underfits) costs about three
+  minutes a run.
 
 ### cheaper-rounds
 
