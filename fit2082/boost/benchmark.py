@@ -28,7 +28,7 @@ def load(path: str, dataset: str, num_train: int, num_valid: int, batch_size: in
     fold = np.loadtxt(f"{path}/{dataset}/test_indices_fold_0.txt")
     indices = np.setdiff1d(np.arange(data.shape[0]), fold)
 
-    np.random.seed(123)
+    np.random.seed(42)
     np.random.shuffle(indices)
 
     training = data[indices[:num_train]]

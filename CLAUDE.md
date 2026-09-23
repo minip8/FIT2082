@@ -106,7 +106,10 @@ Data layout: `data/<Name>/<Name>_X.npy`, `<Name>_y.npy`,
 - Quote validation error against `X_va`. Anything chosen after training
   (early stopping, readout `lam`) must use the separate `X_tune` slice.
 - Keep train and validation splits byte-identical to earlier runs (fixed seed
-  123, fold 0), so that results stay comparable across commits.
+  42, fold 0), so that results stay comparable across commits. Seed 42 gives
+  the rows the tree baselines and streamed runs use. `experiment.py` sweeps made
+  before the `ucr` branch drew seed 123, a different split, so compare them only
+  with each other (`--split-seed 123` reproduces them).
 
 ## Conventions
 

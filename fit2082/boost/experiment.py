@@ -63,7 +63,7 @@ def load_split(
     num_valid: int = 4096,
     num_tune: int = 4096,
     batch_size: int = 4096,
-    seed: int = 123,
+    seed: int = 42,
     transform: str = "quant",
     device: str = "cuda",
     compile: bool = False,
@@ -74,11 +74,18 @@ def load_split(
     once here and the features are reused by every variant in the sweep.
     PULSAR is supervised and is fitted on the training batches alone.
 
+    `seed` 42 draws the same training and validation rows as the tree
+    baselines (`notebooks/compare.ipynb`, `scripts/xgboost_baseline.py`) and the
+    streamed runs (`scripts/stream_full.py`), so HashBoost and the trees are
+    scored on the same rows. Sweeps before the `ucr` branch drew seed 123, which
+    is a different split; `--split-seed 123` reproduces them.
+
     The tune slice is taken from *after* the validation slice rather than out
     of the training indices, so that adding it leaves both the training set and
-    the validation set byte-identical to every earlier sweep. Pedestrian has
-    151,696 rows outside fold 0 against the 69,632 used here, so there is ample
-    unseen data to take it from.
+    the validation set byte-identical to the baselines' split. At seed 42 it is
+    the slice `compare.ipynb` and `stream_full.py` hold back as "te" and never
+    score. Pedestrian has 151,696 rows outside fold 0 against the 69,632 used
+    here, so there is ample unseen data to take it from.
     """
 
     data = Dataset(
@@ -549,6 +556,13 @@ def main() -> None:
     parser.add_argument("--eval-every", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=4096)
     parser.add_argument("--num-train", type=int, default=32768 * 2)
+    parser.add_argument(
+        "--split-seed",
+        type=int,
+        default=42,
+        help="shuffle seed for the train/validation split: 42 is the baselines' "
+        "split, 123 reproduces sweeps made before the ucr branch",
+    )
     parser.add_argument("--out", default="results")
     parser.add_argument("--list", action="store_true")
     parser.add_argument(
@@ -577,6 +591,7 @@ def main() -> None:
         dataset=args.dataset,
         num_train=args.num_train,
         batch_size=args.batch_size,
+        seed=args.split_seed,
         transform=args.transform,
         device=args.device,
         compile=args.compile,
