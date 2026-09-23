@@ -211,22 +211,25 @@ def _error(predicted: Any, y: npt.NDArray[np.int64]) -> float:
 
 def hashboost_batches(
     Z: torch.Tensor, y: torch.Tensor, batch_size: int, seed: int = SEED
-) -> list[tuple[torch.Tensor, torch.Tensor]]:
+) -> list[tuple[torch.Tensor, torch.Tensor, npt.NDArray[np.int64]]]:
     """Fixed batches of at most `batch_size` rows, from one seeded permutation.
+
+    Each batch is (features, labels, row ids), the ids on the host, where
+    `HashBoost.fit_batch` reads them to cache each row's codes.
 
     Every batch must hold two classes: `HardPairSplitter` pairs examples of
     different classes, and on a batch of one class it would never finish.
     """
 
-    order = torch.as_tensor(np.random.default_rng(seed).permutation(Z.shape[0]))
-    order = order.to(Z.device)
+    order = np.random.default_rng(seed).permutation(Z.shape[0])
+    rows = [order[a : a + batch_size] for a in range(0, Z.shape[0], batch_size)]
 
-    batches = [
-        (Z[order[a : a + batch_size]], y[order[a : a + batch_size]])
-        for a in range(0, Z.shape[0], batch_size)
-    ]
+    batches = []
+    for ids in rows:
+        index = torch.as_tensor(ids, device=Z.device)
+        batches.append((Z[index], y[index], ids))
 
-    for _, Y in batches:
+    for _, Y, _ in batches:
         if torch.unique(Y).numel() < 2:
             raise ValueError(
                 "a batch holds a single class, which HardPairSplitter cannot "
@@ -284,8 +287,8 @@ def fit_hashboost(
         step = 0
 
         while model.num_rounds < rounds:
-            X, Y = batches[step % len(batches)]
-            model.fit_batch(X, Y)
+            X, Y, rows = batches[step % len(batches)]
+            model.fit_batch(X, Y, rows=rows)
             step += 1
 
     with _Timer(device, "predict") as predict:

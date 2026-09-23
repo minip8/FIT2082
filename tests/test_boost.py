@@ -1178,6 +1178,82 @@ def test_frozen_cache_matches_rereading_frozen_rounds(device, hashes_per_round):
 
 
 @pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("hashes_per_round", [1, 2])
+@pytest.mark.parametrize("window", [None, 7])
+def test_code_cache_matches_reencoding(device, hashes_per_round, window):
+    """Cached codes are the codes, so the model trains exactly as without them.
+
+    Batches come from a fresh permutation each epoch, so rows arrive having
+    cached different numbers of rounds, and with a frozen window the cache has
+    to agree with the frozen-round bookkeeping about where each batch starts.
+    """
+
+    n, batch, epochs = 240, 60, 5
+    X, Y, k = _data(n=n)
+    rounds = epochs * (n // batch) * hashes_per_round
+    make = _random_splitter(rounds, X.shape[1], device)
+
+    def build():
+        return HashBoost(
+            num_classes=k,
+            max_num_hashes=rounds,
+            hashes_per_round=hashes_per_round,
+            device=device,
+            round_chunk=5,
+            active_rounds=window,
+            splitter=make(),
+        )
+
+    cached = build()
+    reencoded = build()
+
+    rng = np.random.default_rng(0)
+
+    for _ in range(epochs):
+        order = rng.permutation(n)
+
+        for start in range(0, n, batch):
+            rows = order[start : start + batch]
+
+            cached.fit_batch(X[rows], Y[rows], rows=rows * 1000 + 7)
+            reencoded.fit_batch(X[rows], Y[rows])
+
+    # the cache was really used, not bypassed
+    assert cached._codes_upto is not None
+    assert int(cached._codes_upto.max()) == rounds
+
+    assert torch.allclose(cached.tables.logits, reencoded.tables.logits, atol=1e-5)
+    assert torch.allclose(cached.predict(X), reencoded.predict(X), atol=1e-4, rtol=1e-4)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_code_cache_respects_its_budget_and_resets(device):
+
+    X, Y, k = _data()
+    rows = np.arange(X.shape[0])
+
+    off = HashBoost(num_classes=k, max_num_hashes=4, device=device, code_cache_bytes=0)
+    off.fit_batch(X, Y, rows=rows)
+    assert off._codes_cache is None
+
+    # 4 rounds x 512 rows of one-byte codes needs 2,048 bytes
+    tight = HashBoost(
+        num_classes=k, max_num_hashes=4, device=device, code_cache_bytes=2047
+    )
+    tight.fit_batch(X, Y, rows=rows)
+    assert tight._codes_cache is None and tight._codes_off
+
+    model = HashBoost(num_classes=k, max_num_hashes=4, device=device)
+    for _ in range(3):
+        model.fit_batch(X, Y, rows=rows)
+    assert model._codes_cache is not None
+
+    # codes of the old splits must not survive a load
+    model.load_state_dict(model.state_dict())
+    assert model._codes_cache is None and model._codes_upto is None
+
+
+@pytest.mark.parametrize("device", DEVICES)
 def test_bagging_hands_rows_to_every_estimator(device):
 
     X, Y, k = _data()
