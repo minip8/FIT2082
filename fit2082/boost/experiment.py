@@ -376,8 +376,10 @@ def run_once(
     """Train one variant with one seed.
 
     `compile` is a speed knob, not part of any variant: it fuses the hash
-    encoding and leaves every result unchanged. Compilation happens inside the
-    first `fit_batch`, so it is charged to the first seed's wall time.
+    encoding and the leaf refresh. The encoding is exact; the refresh can round
+    a leaf differently in its last 2 ulps, which is below run-to-run noise.
+    Compilation happens inside the first `fit_batch`, so it is charged to the
+    first seed's wall time.
     """
 
     config = dict(config)
@@ -568,8 +570,9 @@ def main() -> None:
     parser.add_argument(
         "--compile",
         action="store_true",
-        help="torch.compile the hash encoding (faster, identical results) and, "
-        "with --transform pulsar, PULSAR's pooling (2x faster, not bit-identical)",
+        help="torch.compile the hash encoding and leaf refresh (faster; leaves "
+        "may differ in the last 2 ulps) and, with --transform pulsar, PULSAR's "
+        "pooling (2x faster, not bit-identical)",
     )
     parser.add_argument(
         "--device", default="cuda" if torch.cuda.is_available() else "cpu"

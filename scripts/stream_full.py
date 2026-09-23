@@ -928,8 +928,9 @@ def main() -> None:
     parser.add_argument(
         "--compile",
         action="store_true",
-        help="torch.compile the hash encoding (faster, identical results) and, "
-        "with --transform pulsar, PULSAR's pooling (2x faster, not bit-identical)",
+        help="torch.compile the hash encoding and leaf refresh (faster; leaves "
+        "may differ in the last 2 ulps) and, with --transform pulsar, PULSAR's "
+        "pooling (2x faster, not bit-identical)",
     )
     # xgboost
     parser.add_argument("--max-bin", type=int, default=256)

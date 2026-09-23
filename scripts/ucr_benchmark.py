@@ -121,7 +121,8 @@ def main() -> None:
     parser.add_argument(
         "--compile",
         action="store_true",
-        help="torch.compile HashBoost's hash encoding (faster, identical results)",
+        help="torch.compile HashBoost's hash encoding and leaf refresh (faster; "
+        "leaves may differ in the last 2 ulps)",
     )
     parser.add_argument(
         "--skip-done",

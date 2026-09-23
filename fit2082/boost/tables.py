@@ -17,6 +17,32 @@ Layout notes (these are load-bearing -- see the comments at each use site):
 import torch
 import torch.nn.functional as F
 
+# Below this many (row, class) outputs, prediction gathers each round's leaf
+# rows and sums them, instead of calling `embedding_bag`. `embedding_bag`
+# gives each output one thread, which walks every round in turn: with 50 rows
+# x 2 classes that is 100 threads each summing 3,000 values, and it is 4.5x
+# slower than gather-and-sum (0.47 against 0.10 ms). Above the limit the
+# gather's (rounds, n, k) intermediate costs more than those serial sums:
+# 600 x 60 is 3.1x slower gathered. Measured at 3,000 rounds; the crossover
+# sits between 6,000 (a tie) and 12,000.
+GATHER_LIMIT = 8192
+
+
+def refresh_into(
+    logits: torch.Tensor, stats: torch.Tensor, k: int, eps: float, lr: float
+) -> None:
+    """Leaf values from their statistics, written into `logits`.
+
+    Compiled, this is one kernel that reads the statistics once, where the eager
+    path in `HashTables.refresh_logits` takes three passes over the table. That
+    is 2.3x faster with 60 classes (5.3 ms to 2.3 ms at 3,000 rounds). It is
+    not bit-identical to the eager path: about a quarter of the leaves differ,
+    by at most 2 ulps.
+    """
+
+    logits.copy_(stats[..., :k] / (stats[..., k:] + eps) * lr)
+
+
 # == tables ====================================================================
 
 
@@ -35,6 +61,7 @@ class HashTables:
         shrinkage_tau: float = 0.0,
         round_chunk: int | None = None,
         chunk_budget_bytes: int = 128 << 20,
+        compile: bool = False,
     ) -> None:
 
         self.num_classes = num_classes
@@ -50,6 +77,9 @@ class HashTables:
         self._round_chunk = round_chunk
         self._refresh_chunk = 128
         self._chunk_budget_bytes = chunk_budget_bytes
+
+        # the unsmoothed refresh as one fused kernel; see `refresh_into`
+        self._refresh = torch.compile(refresh_into, dynamic=True) if compile else None
 
         k = num_classes
         m = max_num_hashes
@@ -77,8 +107,13 @@ class HashTables:
 
         Bounds the largest per-chunk intermediate, the (chunk, n, k) floats that
         `gather_contributions` returns, with room to spare. Too small and
-        per-launch overhead dominates; too large and the allocator starts
-        thrashing.
+        per-launch overhead dominates.
+
+        There used to be a cap of 256 rounds as well. For a big batch the budget
+        binds first anyway: 4,096 rows x 82 classes allows 47 rounds. For a
+        small one the cap alone set the chunk, so 3,000 rounds took 12 chunks of
+        a few launches each where one chunk fits. Accumulating 3,000 rounds for
+        50 rows went from 0.44 to 0.045 ms without it.
         """
 
         if self._round_chunk is not None:
@@ -86,7 +121,7 @@ class HashTables:
 
         per_round = num_examples * 2 * self.num_classes * 4
 
-        return max(8, min(256, self._chunk_budget_bytes // max(1, per_round)))
+        return max(8, self._chunk_budget_bytes // max(1, per_round))
 
     # -- predict ---------------------------------------------------------------
 
@@ -104,14 +139,31 @@ class HashTables:
         """
 
         n = codes.shape[1]
+        k = self.num_classes
         chunk = self.round_chunk(n)
 
-        out = torch.zeros(
-            (n, self.num_classes), dtype=torch.float32, device=self.device
-        )
+        out = torch.zeros((n, k), dtype=torch.float32, device=self.device)
+
+        # few outputs: gather each round's leaf row and sum, see GATHER_LIMIT
+        gather = n * k <= GATHER_LIMIT
 
         for a in range(lo, num_rounds, chunk):
             b = min(a + chunk, num_rounds)
+
+            if gather:
+                # (chunk, n) indices into the re-based table slice
+                index = (
+                    codes[a - lo : b - lo].to(torch.int64) + self.offsets[: b - a, None]
+                )
+                contributions = self.logits[a:b].reshape(-1, k)[index]
+
+                if skip_below is not None:
+                    rounds = torch.arange(a, b, device=self.device)
+                    keep = rounds[:, None] >= skip_below[None, :]
+                    contributions = contributions * keep[..., None]
+
+                out += contributions.sum(0)
+                continue
 
             # chunk-local offsets: the table slice below is re-based to 0
             flat = (
@@ -199,6 +251,17 @@ class HashTables:
         """
 
         k = self.num_classes
+
+        if not (self.neighbour_shrinkage or self.shrinkage_tau) and self._refresh:
+            self._refresh(
+                self.logits[lo:num_rounds],
+                self.stats[lo:num_rounds],
+                k,
+                self.hessian_eps,
+                self.lr,
+            )
+
+            return
 
         if not (self.neighbour_shrinkage or self.shrinkage_tau):
             # The same three operations in the same order as

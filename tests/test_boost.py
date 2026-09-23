@@ -173,6 +173,74 @@ def test_round_chunk_invariance(device, round_chunk):
     assert torch.allclose(baseline.predict(X), chunked.predict(X), atol=1e-4, rtol=1e-4)
 
 
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("skip", [False, True])
+def test_predict_paths_agree(device, skip, monkeypatch):
+    """Gathering and `embedding_bag` sum the same leaves, masked or not.
+
+    Which one runs depends on the batch's shape (`GATHER_LIMIT`), so each is
+    forced here in turn on the same codes, over several chunks and with the
+    per-row round mask the frozen-round cache uses.
+    """
+
+    import fit2082.boost.tables as tables_module
+
+    torch.manual_seed(0)
+    n, k, rounds, num_bits = 64, 5, 40, 6
+
+    tables = HashTables(
+        num_classes=k,
+        num_bits=num_bits,
+        max_num_hashes=rounds,
+        lr=0.1,
+        device=torch.device(device),
+        round_chunk=7,
+    )
+    tables.logits.normal_()
+    codes = torch.randint(0, 2**num_bits, (rounds, n), device=device).to(
+        code_dtype(num_bits)
+    )
+    skip_below = torch.randint(0, rounds, (n,), device=device) if skip else None
+
+    monkeypatch.setattr(tables_module, "GATHER_LIMIT", 10**9)
+    gathered = tables.predict_from_codes(codes, rounds, skip_below=skip_below)
+
+    monkeypatch.setattr(tables_module, "GATHER_LIMIT", 0)
+    bagged = tables.predict_from_codes(codes, rounds, skip_below=skip_below)
+
+    assert torch.allclose(gathered, bagged, atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="compiles through triton")
+def test_fused_refresh_matches_eager():
+    """The compiled refresh may round differently, but only in the last bits."""
+
+    torch.manual_seed(0)
+    k, rounds = 7, 30
+
+    def build(compile):
+        tables = HashTables(
+            num_classes=k,
+            num_bits=5,
+            max_num_hashes=rounds,
+            lr=0.1,
+            device=torch.device("cuda"),
+            compile=compile,
+        )
+        tables.stats.copy_(stats)
+        tables.refresh_logits(rounds - 3, lo=2)
+        return tables
+
+    stats = torch.rand((rounds, 32, 2 * k), device="cuda")
+    stats[..., :k] -= 0.5
+
+    eager, fused = build(False), build(True)
+
+    assert torch.allclose(eager.logits, fused.logits, rtol=1e-6, atol=1e-7)
+    # rounds outside [lo, num_rounds) are left alone
+    assert not fused.logits[:2].any() and not fused.logits[rounds - 3 :].any()
+
+
 @pytest.mark.skipif(len(DEVICES) < 2, reason="needs both cpu and cuda")
 def test_device_parity():
 

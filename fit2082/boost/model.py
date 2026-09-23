@@ -143,6 +143,7 @@ class HashBoost:
             neighbour_shrinkage=neighbour_shrinkage,
             shrinkage_tau=shrinkage_tau,
             round_chunk=round_chunk,
+            compile=compile,
         )
 
         self.num_rounds = 0

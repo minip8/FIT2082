@@ -37,8 +37,9 @@ Everything runs through `uv` (Python 3.12).
     uv run python scripts/ucr_benchmark.py --compile --models hashboost --bits 2 \
         --rounds 3200 --label hb_b2_r3200            # a HashBoost variant beside the rest
 
-`--compile` (torch.compile the hash encoding) gives identical results and is
-faster, but costs a few seconds on first use. Scripts under `scripts/` accept
+`--compile` (torch.compile the hash encoding and the leaf refresh) is faster
+but costs a few seconds on first use. The encoding is exact; the fused refresh
+can round a leaf differently in its last 2 ulps, well below run-to-run noise. Scripts under `scripts/` accept
 `--stdin` to read their arguments as JSON or as flag text (`fit2082/cli.py`).
 
 ## Architecture
