@@ -57,7 +57,9 @@ import argparse
 import mmap
 import os
 import time
+from collections import deque
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -138,6 +140,9 @@ def split_indices(
 
 # == streaming =================================================================
 
+# (series, labels, row ids) for one batch, as `RawStream.with_rows` yields it
+RawBatch = tuple[np.ndarray, np.ndarray, np.ndarray]
+
 
 class RawStream:
     """Batches of raw series read straight from the .npy memmap.
@@ -213,7 +218,7 @@ class RawStream:
         for raw, y, _ in self.with_rows():
             yield raw, y
 
-    def with_rows(self) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    def with_rows(self) -> Iterator[RawBatch]:
         """Batches as `(series, labels, row ids)`.
 
         The ids are the rows' indices into the .npy files, so they stay the same
@@ -235,12 +240,66 @@ class RawStream:
             if self.drop_cache_every and (i + 1) % self.drop_cache_every == 0:
                 self.drop_cache()
 
+    def epochs(self, count: int) -> Iterator[RawBatch]:
+        """`with_rows` for `count` epochs back to back, each with its own shuffle."""
+
+        for _ in range(count):
+            yield from self.with_rows()
+
     def gather(self, indices: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Read one fixed set of rows, for the held-out slices."""
 
         order = np.sort(indices)
 
         return np.array(self._X[order], dtype=np.float32), np.array(self._Y[order])
+
+
+class Prefetch:
+    """Read batches in a background thread while the GPU trains on earlier ones.
+
+    A LenDB batch takes about as long to read out of the memmap (117 ms) as to
+    transform on the GPU (125 ms), and the two use different hardware. NumPy
+    lets go of the GIL while it copies rows out of the memmap: over 40 LenDB
+    batches, reading and QUANT together took 7.6 s against 13.7 s one after
+    the other, and QUANT itself slowed by 6%.
+
+    Batches arrive in the iterator's own order, so the model sees exactly what
+    it would have seen serially. `depth` reads run ahead of the training loop,
+    so at most `depth + 1` batches are in memory at once (27 MB each on LenDB).
+    `depth=0` reads inline instead. `busy_s` is the time spent reading, in
+    whichever thread did it.
+    """
+
+    def __init__(self, batches: Iterator[RawBatch], depth: int = 1) -> None:
+
+        self.busy_s = 0.0
+
+        self._batches = batches
+        self._depth = depth
+
+    def _read(self) -> RawBatch | None:
+
+        mark = time.perf_counter()
+        batch = next(self._batches, None)
+        self.busy_s += time.perf_counter() - mark
+
+        return batch
+
+    def __iter__(self) -> Iterator[RawBatch]:
+
+        if not self._depth:
+            while (batch := self._read()) is not None:
+                yield batch
+            return
+
+        # One reader thread, so reads run one at a time and in order, and a
+        # failed read raises here, out of `result()`.
+        with ThreadPoolExecutor(max_workers=1) as reader:
+            ahead = deque(reader.submit(self._read) for _ in range(self._depth))
+
+            while (batch := ahead.popleft().result()) is not None:
+                ahead.append(reader.submit(self._read))
+                yield batch
 
 
 def auto_drop_cache_every(path_X: str, every: int = 50) -> int:
@@ -398,6 +457,7 @@ def run_hashboost(
         "max_epochs": args.epochs,
         "estimators": args.estimators,
         "active_epochs": args.active_epochs,
+        "prefetch": args.prefetch,
     }
 
     torch.manual_seed(args.seed)
@@ -417,9 +477,14 @@ def run_hashboost(
         flush=True,
     )
 
+    # With a background reader, reading no longer adds to the wall time by
+    # itself. `batches.busy_s` is the time spent reading, and `read_wait_s` is
+    # the part of it the training loop sat waiting for; serially they are equal.
+    batches = Prefetch(stream.epochs(args.epochs), depth=args.prefetch)
+
     records: dict[str, list[tuple[int, float]]] = {"tr": [], "va": []}
     peak_mb = gpu_used_mb(device)
-    read_s = 0.0
+    read_wait_s = 0.0
     transform_s = 0.0
     fit_s = 0.0
     eval_s = 0.0
@@ -457,7 +522,8 @@ def run_hashboost(
                 "resident": "one batch",
             },
             "rounds": rounds,
-            "read_s": read_s,
+            "read_s": batches.busy_s,
+            "read_wait_s": read_wait_s,
             "transform_s": transform_s,
             "fit_s": fit_s,
             "eval_s": eval_s,
@@ -471,76 +537,74 @@ def run_hashboost(
 
     wall, cpu = time.perf_counter(), time.process_time()
 
-    for _ in range(args.epochs):
-        # `for raw, y in stream` would fold the memmap read into the loop
-        # machinery, where it cannot be timed -- and the read is the part that
-        # dropping the page cache makes expensive, so it is the part worth
-        # measuring. Pull each batch explicitly instead.
-        batches = stream.with_rows()
+    # `for batch in batches` would fold the wait for a batch into the loop
+    # machinery, where it cannot be timed. Pull each batch explicitly instead.
+    pending = iter(batches)
 
-        while True:
+    while True:
+        mark = time.perf_counter()
+        batch = next(pending, None)
+        read_wait_s += time.perf_counter() - mark
+
+        if batch is None:
+            break
+
+        raw, y, rows = batch
+
+        mark = time.perf_counter()
+        Z = features(raw, transform, device)
+        Y = torch.as_tensor(y.astype(np.int64), device=device)
+        synchronise()
+        transform_s += time.perf_counter() - mark
+
+        mark = time.perf_counter()
+        model.fit_batch(Z, Y, rows=rows)
+        synchronise()
+        fit_s += time.perf_counter() - mark
+
+        rounds += 1
+
+        del Z, Y
+
+        if rounds % args.eval_every == 0 or rounds == total_rounds:
             mark = time.perf_counter()
-            batch = next(batches, None)
-            read_s += time.perf_counter() - mark
+            evaluate()
+            eval_s += time.perf_counter() - mark
 
-            if batch is None:
-                break
+            timeline.append(
+                {
+                    "round": rounds,
+                    "wall_s": time.perf_counter() - wall,
+                    "read_s": batches.busy_s,
+                    "read_wait_s": read_wait_s,
+                    "transform_s": transform_s,
+                    "fit_s": fit_s,
+                    "eval_s": eval_s,
+                }
+            )
 
-            raw, y, rows = batch
+            peak_mb = max(peak_mb, gpu_used_mb(device))
 
-            mark = time.perf_counter()
-            Z = features(raw, transform, device)
-            Y = torch.as_tensor(y.astype(np.int64), device=device)
-            synchronise()
-            transform_s += time.perf_counter() - mark
-
-            mark = time.perf_counter()
-            model.fit_batch(Z, Y, rows=rows)
-            synchronise()
-            fit_s += time.perf_counter() - mark
-
-            rounds += 1
-
-            del Z, Y
-
-            if rounds % args.eval_every == 0 or rounds == total_rounds:
-                mark = time.perf_counter()
-                evaluate()
-                eval_s += time.perf_counter() - mark
-
-                timeline.append(
+            # a streamed run is long and has already been killed once by a
+            # low-memory watchdog; write what exists after every eval
+            checkpoint(
+                entry(
                     {
-                        "round": rounds,
+                        "phase": "train",
                         "wall_s": time.perf_counter() - wall,
-                        "read_s": read_s,
-                        "transform_s": transform_s,
-                        "fit_s": fit_s,
-                        "eval_s": eval_s,
+                        "cpu_s": time.process_time() - cpu,
                     }
                 )
+            )
 
-                peak_mb = max(peak_mb, gpu_used_mb(device))
-
-                # a streamed run is long and has already been killed once by
-                # a low-memory watchdog; write what exists after every eval
-                checkpoint(
-                    entry(
-                        {
-                            "phase": "train",
-                            "wall_s": time.perf_counter() - wall,
-                            "cpu_s": time.process_time() - cpu,
-                        }
-                    )
-                )
-
-                print(
-                    f"    round {rounds:5d}/{total_rounds}  "
-                    f"tr={records['tr'][-1][1]:.4f} va={records['va'][-1][1]:.4f}  "
-                    f"{time.perf_counter() - wall:6.0f}s (fit {fit_s:4.0f}s)  "
-                    f"gpu {gpu_used_mb(device):5.0f} MB"
-                    f"  rss {host_rss_mb():5.0f} MB  avail {host_available_mb():5.0f} MB",
-                    flush=True,
-                )
+            print(
+                f"    round {rounds:5d}/{total_rounds}  "
+                f"tr={records['tr'][-1][1]:.4f} va={records['va'][-1][1]:.4f}  "
+                f"{time.perf_counter() - wall:6.0f}s (fit {fit_s:4.0f}s)  "
+                f"gpu {gpu_used_mb(device):5.0f} MB"
+                f"  rss {host_rss_mb():5.0f} MB  avail {host_available_mb():5.0f} MB",
+                flush=True,
+            )
 
     elapsed = {
         "phase": "train",
@@ -552,8 +616,9 @@ def run_hashboost(
 
     print(
         f"  {rounds} rounds in {elapsed['wall_s']:.0f}s "
-        f"({read_s:.0f}s reading, {transform_s:.0f}s transforming, "
-        f"{fit_s:.0f}s fitting)  va_final={va[-1]:.4f} va_best={min(va):.4f}",
+        f"({batches.busy_s:.0f}s reading, {read_wait_s:.0f}s of it waited on; "
+        f"{transform_s:.0f}s transforming, {fit_s:.0f}s fitting)  "
+        f"va_final={va[-1]:.4f} va_best={min(va):.4f}",
         flush=True,
     )
 
@@ -924,6 +989,13 @@ def main() -> None:
         default=0.0,
         help="freeze rounds older than this many epochs' worth, so per-batch cost "
         "stops growing with the model (0 = never freeze)",
+    )
+    parser.add_argument(
+        "--prefetch",
+        type=int,
+        default=1,
+        help="batches read ahead in a background thread while the GPU trains "
+        "(0 = read inline, one stage after another)",
     )
     parser.add_argument(
         "--compile",

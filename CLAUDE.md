@@ -21,7 +21,7 @@ of the design (chunking, streaming, page-cache eviction).
 
 Everything runs through `uv` (Python 3.12).
 
-    uv run pytest                                   # 208 tests; CUDA-only ones skip without a GPU
+    uv run pytest                                   # 214 tests; CUDA-only ones skip without a GPU
     uv run pytest tests/test_boost.py::test_name    # single test
     uv run ruff check . && uv run ruff format .
     uv run ty check
@@ -112,6 +112,9 @@ Also:
   never holding it all in memory, for HashBoost or XGBoost (external-memory
   ellpack). It includes page-cache management; the README's "Practical notes"
   explain why (sorted batch indices, readahead, periodic `MADV_DONTNEED`).
+  HashBoost runs read the next batch in a background thread while the GPU
+  trains (`--prefetch`; 0 restores the serial loop). `read_s` is the time spent
+  reading, and `read_wait_s` the part the training loop waited for.
 - `notebooks/`: plot from `results/*.json` and train nothing
   (`compare.ipynb` is the exception: it produced the off-the-shelf baselines).
 
