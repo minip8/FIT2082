@@ -8,7 +8,7 @@
 # ECML PKDD 2024
 
 from collections.abc import Callable, Iterable, Iterator
-from typing import Any, Protocol
+from typing import Any, NamedTuple, Protocol
 
 import numpy as np
 import numpy.typing as npt
@@ -66,6 +66,10 @@ def make_intervals(input_length: int, depth: int) -> torch.Tensor:
 
 # == quantile function =========================================================
 
+# Upstream's features, one interval at a time. `IntervalModel` computes the same
+# features for every interval of one length at once; this stays as the reference
+# that tests/test_quant.py holds it to.
+
 
 def f_quantile(X: torch.Tensor, div: int = 4) -> torch.Tensor:
 
@@ -100,7 +104,30 @@ def f_quantile(X: torch.Tensor, div: int = 4) -> torch.Tensor:
 # == interval model (per representation) =======================================
 
 
+class _Windows(NamedTuple):
+    """Every interval of one length, and where its quantiles go."""
+
+    index: torch.Tensor  # (windows, length) the samples of each interval
+    columns: torch.Tensor  # (channels * windows * k,) output columns, (c, w, k) order
+    below: torch.Tensor  # (k,) the order statistic each quantile starts from,
+    above: torch.Tensor  # (k,) the one it interpolates towards,
+    weight: torch.Tensor  # (k,) and how far it goes
+
+
 class IntervalModel:
+    """QUANT's quantiles over one representation's intervals.
+
+    Upstream calls `f_quantile` once per interval. That is 480 calls per LenDB
+    batch, each a sort and about 20 small kernels, and intervals of two to `div`
+    samples add a host sync each (82 per Traffic batch). The intervals come in
+    only a few lengths, though: 9 to 11 per representation on LenDB. So `fit`
+    groups them by length, and `transform` sorts every window of one length in
+    a single call, then writes each quantile where upstream's layout put it.
+
+    On series without NaN the quantiles are exactly torch.quantile's. The window
+    mean subtracted from the odd ones can differ from upstream's in its last bit.
+    """
+
     def __init__(self, input_length: int, depth: int = 6, div: int = 4) -> None:
 
         assert div >= 1
@@ -113,18 +140,77 @@ class IntervalModel:
             depth=depth,
         )
 
+        # set by `fit`, which sees the channel count and the device
+        self.channels = 0
+        self.num_features = 0
+        self.groups: list[_Windows] = []
+
     def fit(self, X: torch.Tensor, Y: Labels | None = None) -> None:
 
-        pass
+        self.channels = X.shape[1]
+
+        # Upstream's layout: interval after interval, each `channels` runs of k
+        # quantiles, so an interval's first column follows every column of the
+        # intervals before it.
+        lengths = self.intervals[:, 1] - self.intervals[:, 0]
+        k = 1 + (lengths - 1) // self.div
+        width = self.channels * k
+        first = width.cumsum(0) - width
+
+        self.num_features = int(width.sum())
+        self.groups = []
+
+        for length in lengths.unique().tolist():
+            members = (lengths == length).nonzero().squeeze(1)
+            num = int(k[members[0]])
+
+            index = self.intervals[members, :1] + torch.arange(length)
+            columns = (
+                first[members][None, :, None]
+                + num * torch.arange(self.channels)[:, None, None]
+                + torch.arange(num)
+            )
+
+            # torch.quantile's ranks. An interval of at most `div` samples gets
+            # only its median, which for a single sample is the sample itself.
+            q = (
+                torch.full((1,), 0.5, device=X.device)
+                if num == 1
+                else torch.linspace(0, 1, num, device=X.device)
+            )
+            rank = q * (length - 1)
+            below = rank.long()
+
+            self.groups.append(
+                _Windows(
+                    index=index.to(X.device),
+                    columns=columns.flatten().to(X.device),
+                    below=below,
+                    above=rank.ceil().long(),
+                    weight=rank - below,
+                )
+            )
 
     def transform(self, X: torch.Tensor) -> torch.Tensor:
 
-        features = []
+        assert X.shape[1] == self.channels, "fitted on a different number of channels"
 
-        for a, b in self.intervals:
-            features.append(f_quantile(X[..., a:b], div=self.div).squeeze(1))
+        features = X.new_empty(X.shape[0], self.num_features)
 
-        return torch.cat(features, -1)
+        for group in self.groups:
+            windows = X[..., group.index]  # (n, channels, windows, length)
+
+            # torch.quantile's linear interpolation, without its NaN checks and
+            # rank bookkeeping: about a sixth of LenDB's time
+            ordered = windows.sort(-1).values
+            quantiles = ordered[..., group.below].lerp(
+                ordered[..., group.above], group.weight
+            )
+            quantiles[..., 1::2] -= windows.mean(-1, keepdim=True)
+
+            features[:, group.columns] = quantiles.flatten(1)
+
+        return features
 
     def fit_transform(self, X: torch.Tensor, Y: Labels | None = None) -> torch.Tensor:
 

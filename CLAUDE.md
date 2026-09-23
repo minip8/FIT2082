@@ -21,7 +21,7 @@ of the design (chunking, streaming, page-cache eviction).
 
 Everything runs through `uv` (Python 3.12).
 
-    uv run pytest                                   # 183 tests; CUDA-only ones skip without a GPU
+    uv run pytest                                   # 208 tests; CUDA-only ones skip without a GPU
     uv run pytest tests/test_boost.py::test_name    # single test
     uv run ruff check . && uv run ruff format .
     uv run ty check
@@ -91,7 +91,10 @@ Also:
   maths breaks these tests, the default model no longer matches the reference.
   Change the tests only as a deliberate decision.
 - `fit2082/quant/quant.py`: QUANT transform (third-party research code, adapted
-  for torch). `fit2082/demo/utils.py` has `Dataset`, the memmapped `.npy` loader.
+  for torch). `IntervalModel` sorts every interval of one length in a single
+  call. Upstream's per-interval `f_quantile` stays as the reference that
+  `tests/test_quant.py` checks it against. `fit2082/demo/utils.py` has
+  `Dataset`, the memmapped `.npy` loader.
 - `fit2082/pulsar/pulsar.py`: PULSAR transform, a torch port of GPL-3.0 upstream
   code. Unlike QUANT it is supervised: `Pulsar().fit(batches)` needs labels.
   `--transform pulsar` selects it in `experiment.py` and `scripts/stream_full.py`
