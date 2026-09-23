@@ -11,6 +11,14 @@ from typing import Protocol
 import numpy as np
 import torch
 
+try:
+    import triton
+    import triton.language as tl
+
+    HAVE_TRITON = True
+except ImportError:  # CPU-only installs; pairing then stays on the host
+    HAVE_TRITON = False
+
 # == protocol ==================================================================
 
 
@@ -88,6 +96,73 @@ def _pair(order: np.ndarray, classes: np.ndarray, num_pairs: int) -> np.ndarray:
     return pairs
 
 
+# The same greedy pairing as `_pair`, as a one-thread GPU kernel. It is still
+# a sequential walk, but running it where the order already lives spares the
+# host sync the NumPy loop needs: with that sync every round made the host wait
+# for the GPU to drain before it could queue the next round's work, which on
+# small batches is most of a round. The walk is `_pair`'s state machine with
+# the slot scan collapsed. Because pending anchors always share a class (see
+# `_pair`), an example either completes the oldest pending slot (any other
+# class), anchors the next free slot (the pending class, or none pending), or
+# is skipped (the pending class, with every slot taken).
+if HAVE_TRITON:
+
+    @triton.jit(do_not_specialize=["n", "max_steps"])
+    def _pair_kernel(order_ptr, classes_ptr, pairs_ptr, n, num_pairs, max_steps):
+
+        found = 0
+        pending = 0
+        pointer = 0
+        steps = 0
+        pending_class = tl.load(classes_ptr)  # replaced before it is read
+
+        # max_steps only bounds a batch of one class, which never completes
+        while (found < num_pairs) & (steps < max_steps):
+            index = tl.load(order_ptr + pointer)
+            label = tl.load(classes_ptr + pointer)
+
+            if pending == 0:
+                tl.store(pairs_ptr + 2 * found, index)
+                pending = 1
+                pending_class = label
+            elif label != pending_class:
+                tl.store(pairs_ptr + 2 * found + 1, index)
+                found += 1
+                pending -= 1
+            elif found + pending < num_pairs:
+                tl.store(pairs_ptr + 2 * (found + pending), index)
+                pending += 1
+
+            pointer += 1
+            if pointer >= n:
+                pointer = 0
+            steps += 1
+
+
+def pair_on_device(
+    order: torch.Tensor, classes: torch.Tensor, num_pairs: int
+) -> torch.Tensor:
+    """`_pair` on the GPU: (num_pairs, 2) example indices, without a host sync.
+
+    `order` and `classes` are (n,) int64 CUDA tensors, `classes` already
+    permuted to match `order`. A batch needs two classes, as for `_pair`: with
+    one, no pair can complete, and where `_pair` would loop forever this stops
+    after a bounded walk and leaves the unfinished slots pointing at example 0.
+    """
+
+    n = order.shape[0]
+    pairs = torch.zeros((num_pairs, 2), dtype=torch.int64, device=order.device)
+
+    # each completion takes at most one full pass, and one more to anchor
+    max_steps = (num_pairs + 1) * (n + 1)
+
+    _pair_kernel[(1,)](
+        order.contiguous(), classes.contiguous(), pairs, n, num_pairs, max_steps
+    )
+
+    return pairs
+
+
 class HardPairSplitter:
     """The original scheme.
 
@@ -151,16 +226,18 @@ class HardPairSplitter:
     ) -> tuple[torch.Tensor, torch.Tensor]:
 
         order = self.order(probabilities, Y)
+        classes = Y[order].to(torch.int64)
 
-        # the pairing loop is inherently sequential, but runs only a couple of
-        # dozen iterations; this is the one host sync per batch and costs <1%
-        pairs = _pair(
-            order=order.cpu().numpy(),
-            classes=Y[order].cpu().numpy(),
-            num_pairs=num_bits,
-        )
-
-        pair_indices = torch.as_tensor(pairs, device=X.device)
+        if X.is_cuda and HAVE_TRITON:
+            # on the device, so that the host never waits for the GPU here
+            pair_indices = pair_on_device(order, classes, num_bits)
+        else:
+            pairs = _pair(
+                order=order.cpu().numpy(),
+                classes=classes.cpu().numpy(),
+                num_pairs=num_bits,
+            )
+            pair_indices = torch.as_tensor(pairs, device=X.device)
 
         feature_indices = torch.randint(
             0,

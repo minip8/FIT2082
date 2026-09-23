@@ -638,6 +638,72 @@ def test_sampled_pair_order_is_random_but_stays_on_hard_examples(device):
     assert not torch.equal(sampled[:64], order(True, seed=1)[:64])
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the kernel runs on CUDA")
+def test_pairing_on_device_matches_the_host_loop():
+    """The GPU walk makes exactly the pairs `_pair` makes.
+
+    The cases cover balanced and heavily imbalanced batches, many classes,
+    more pairs than examples (so the walk wraps round), and a lone example of
+    the minority class, which every pair has to reuse.
+    """
+
+    from fit2082.boost.splits import _pair, pair_on_device
+
+    rng = np.random.default_rng(0)
+
+    def check(classes, num_pairs):
+        order = rng.permutation(len(classes))
+        permuted = classes[order]
+
+        expected = _pair(order, permuted, num_pairs)
+        actual = pair_on_device(
+            torch.as_tensor(order, device="cuda"),
+            torch.as_tensor(permuted, device="cuda"),
+            num_pairs,
+        )
+
+        assert np.array_equal(expected, actual.cpu().numpy()), (classes, num_pairs)
+
+    for n in (2, 3, 7, 50, 600):
+        for k in (2, 3, 10):
+            for majority in (0.5, 0.9, 0.99):
+                for num_pairs in (1, 2, 4, 8):
+                    classes = np.where(
+                        rng.random(n) < majority, 0, rng.integers(1, k, n)
+                    )
+                    classes[:2] = [0, 1]  # at least two classes, always
+                    check(classes.astype(np.int64), num_pairs)
+
+    lone = np.zeros(300, dtype=np.int64)
+    lone[137] = 1
+    check(lone, 8)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the kernel runs on CUDA")
+def test_splitter_proposes_the_same_on_device_and_host(monkeypatch):
+
+    import fit2082.boost.splits as splits_module
+
+    X, Y, k = _data()
+    X, Y = torch.as_tensor(X, device="cuda"), torch.as_tensor(Y, device="cuda").long()
+    probabilities = torch.softmax(torch.randn(X.shape[0], k, device="cuda"), -1)
+
+    # the pairing reads neither; they are passed for splitters that do
+    unused = torch.empty(0, device="cuda")
+
+    def propose():
+        generator = torch.Generator(device="cuda").manual_seed(3)
+        splitter = HardPairSplitter(generator=generator)
+        return splitter.propose(X, Y, probabilities, unused, unused, 8)
+
+    on_device = propose()
+    monkeypatch.setattr(splits_module, "HAVE_TRITON", False)
+    on_host = propose()
+
+    assert torch.equal(on_device[0], on_host[0])
+    assert torch.equal(on_device[1], on_host[1])
+
+
 @pytest.mark.parametrize("device", DEVICES)
 def test_sampled_pairs_train(device):
 
