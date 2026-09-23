@@ -2,6 +2,89 @@
 
 ## Benchmarks
 
+### cheaper-rounds
+
+The UCR grid made the cost of a round the bottleneck: a 3,200-round cell took
+about 23 minutes, and on most training sets the GPU barely noticed the work.
+One round profiled at 3,000 rounds (ms, unprofiled):
+
+| stage | GunPoint (50 rows, 2 classes) | ShapesAll (600 rows, 60 classes) |
+| --- | ---: | ---: |
+| whole round | 5.6 | 11.0 |
+| re-encode every existing round | 1.64 | 2.43 |
+| predict over every round | 1.34 | 1.92 |
+| accumulate into every round | 0.44 | 2.78 |
+| refresh every leaf | 0.11 | 5.43 |
+| pairing + host sync | 0.59 | 0.81 |
+
+On GunPoint at 800 rounds the GPU was busy for 0.27 ms of a 2.9 ms round.
+The rest was Python, 68 kernel launches and a host sync. Four changes, all
+exact except the fused refresh:
+
+* **Kernels (c365a1c).** Three changes in `tables.py`:
+  * Chunks are no longer capped at 256 rounds. The memory budget already binds
+    for big batches, so only small ones change: accumulating 3,000 rounds for
+    50 rows goes from 0.44 to 0.045 ms.
+  * Prediction gathers and sums when rows x classes <= 8,192
+    (`GATHER_LIMIT`), because `embedding_bag`'s one thread per output walks
+    every round serially: 50 x 2 goes from 0.47 to 0.10 ms.
+  * With `--compile` the leaf refresh is one fused kernel (5.3 to 2.3 ms at 60
+    classes). It is not bit-identical: a quarter of the leaves differ, by at
+    most 2 ulps.
+* **Pairing on the GPU (94bfbe9).** A one-thread Triton kernel runs `_pair`'s
+  greedy walk, so the host no longer waits for the GPU every round. It makes
+  the same pairs as `_pair` on 181 cases, including wrap-arounds and a lone
+  minority example. Without Triton, or on the CPU, the NumPy loop stays.
+* **A per-row code cache (70d35b7).** Given row ids, a batch encodes only the
+  rounds created since its rows were last seen, since a round's codes never
+  change. The cache is bounded by `code_cache_bytes` (256 MB) and dropped past
+  it. `experiment.py` and `fit_hashboost` pass row ids.
+* **Shards (9711506).** `scripts/ucr_benchmark.py --shard i/N` splits the
+  datasets across processes that share the GPU.
+
+ms per round at 800 / 3,000 rounds, each column adding one change. These are
+single 100-round timings, so steps of about 0.3 ms are within their noise:
+
+| case | before | kernels | + pairing | + code cache |
+| --- | ---: | ---: | ---: | ---: |
+| GunPoint, 8 bits | 2.35 / 6.43 | 1.86 / 3.30 | 1.56 / 3.53 | **1.44 / 1.22** |
+| GunPoint, 2 bits | 2.43 / 5.80 | 2.25 / 3.78 | 1.85 / 2.77 | **1.53 / 1.35** |
+| ShapesAll, 8 bits | 3.96 / 12.09 | 2.90 / 7.39 | 2.06 / 6.57 | **2.05 / 6.30** |
+| ShapesAll, 2 bits | 2.61 / 6.84 | 2.39 / 5.92 | 2.64 / 5.08 | **1.47 / 5.21** |
+| ElectricDevices, 8 bits | 3.34 / 9.79 | 3.21 / 8.49 | 2.50 / 8.57 | **2.08 / 7.18** |
+
+On a small training set the cost of a round no longer grows with the number of
+rounds. End to end over the UCR 112, unsharded and one run each:
+
+| cell | fit, before -> after | wall, before -> after | mean error, before -> after |
+| --- | ---: | ---: | ---: |
+| 8 bits, 800 rounds | 182 -> 134 s | 4:14 -> 3:28 | 0.1956 -> 0.1946 |
+| 2 bits, 3,200 rounds | 1,413 -> 691 s | 24:51 -> 12:50 | 0.1647 -> 0.1646 |
+
+Three concurrent shards brought the 3,200-round cell down to **7:43** of wall
+time. Contention raised their summed fit time to 1,141 s, and the mean error
+was 0.1648. So the grid's most expensive cell now takes a third of the time.
+Accuracy is unchanged. The means moved by at most 0.001, where two runs of the
+default differed by 0.0015.
+
+On MONSTER's large batches (Pedestrian through `experiment.py`, 65,536 rows,
+second of two seeds), the baseline went from 7.7 to 6.4 s and `capacity_2`
+from 24.3 to 21.7 s. The code cache raised peak GPU memory from 284 to 349 MB
+and from 489 to 628 MB.
+
+What is left:
+
+* **Small sets:** a round is now 40 launches, and the GPU is busy for 0.09 of
+  the 1.4-1.7 ms a round takes at 800 rounds. The rest is Python and launch overhead, spread
+  thinly across the objective, the pairing and the compiled calls. The next
+  step is CUDA graphs. A round's shapes grow with the round count, so a graph
+  would have to run every round over the full budget with masks: uncreated
+  rounds already hold zero leaves, and their updates would be masked to zero.
+  That is a separate code path, and it has not been tried.
+* **Many classes:** ShapesAll-like sets are bound by accumulating and
+  predicting over every round, which is rounds x rows x classes per batch. Only
+  frozen rounds (`active_rounds`) change that.
+
 ### ucr
 
 Two things on this branch. Every model is now scored on the same MONSTER rows,

@@ -173,6 +173,74 @@ def test_round_chunk_invariance(device, round_chunk):
     assert torch.allclose(baseline.predict(X), chunked.predict(X), atol=1e-4, rtol=1e-4)
 
 
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("skip", [False, True])
+def test_predict_paths_agree(device, skip, monkeypatch):
+    """Gathering and `embedding_bag` sum the same leaves, masked or not.
+
+    Which one runs depends on the batch's shape (`GATHER_LIMIT`), so each is
+    forced here in turn on the same codes, over several chunks and with the
+    per-row round mask the frozen-round cache uses.
+    """
+
+    import fit2082.boost.tables as tables_module
+
+    torch.manual_seed(0)
+    n, k, rounds, num_bits = 64, 5, 40, 6
+
+    tables = HashTables(
+        num_classes=k,
+        num_bits=num_bits,
+        max_num_hashes=rounds,
+        lr=0.1,
+        device=torch.device(device),
+        round_chunk=7,
+    )
+    tables.logits.normal_()
+    codes = torch.randint(0, 2**num_bits, (rounds, n), device=device).to(
+        code_dtype(num_bits)
+    )
+    skip_below = torch.randint(0, rounds, (n,), device=device) if skip else None
+
+    monkeypatch.setattr(tables_module, "GATHER_LIMIT", 10**9)
+    gathered = tables.predict_from_codes(codes, rounds, skip_below=skip_below)
+
+    monkeypatch.setattr(tables_module, "GATHER_LIMIT", 0)
+    bagged = tables.predict_from_codes(codes, rounds, skip_below=skip_below)
+
+    assert torch.allclose(gathered, bagged, atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="compiles through triton")
+def test_fused_refresh_matches_eager():
+    """The compiled refresh may round differently, but only in the last bits."""
+
+    torch.manual_seed(0)
+    k, rounds = 7, 30
+
+    def build(compile):
+        tables = HashTables(
+            num_classes=k,
+            num_bits=5,
+            max_num_hashes=rounds,
+            lr=0.1,
+            device=torch.device("cuda"),
+            compile=compile,
+        )
+        tables.stats.copy_(stats)
+        tables.refresh_logits(rounds - 3, lo=2)
+        return tables
+
+    stats = torch.rand((rounds, 32, 2 * k), device="cuda")
+    stats[..., :k] -= 0.5
+
+    eager, fused = build(False), build(True)
+
+    assert torch.allclose(eager.logits, fused.logits, rtol=1e-6, atol=1e-7)
+    # rounds outside [lo, num_rounds) are left alone
+    assert not fused.logits[:2].any() and not fused.logits[rounds - 3 :].any()
+
+
 @pytest.mark.skipif(len(DEVICES) < 2, reason="needs both cpu and cuda")
 def test_device_parity():
 
@@ -568,6 +636,72 @@ def test_sampled_pair_order_is_random_but_stays_on_hard_examples(device):
 
     assert torch.equal(sampled, order(True, seed=0))
     assert not torch.equal(sampled[:64], order(True, seed=1)[:64])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the kernel runs on CUDA")
+def test_pairing_on_device_matches_the_host_loop():
+    """The GPU walk makes exactly the pairs `_pair` makes.
+
+    The cases cover balanced and heavily imbalanced batches, many classes,
+    more pairs than examples (so the walk wraps round), and a lone example of
+    the minority class, which every pair has to reuse.
+    """
+
+    from fit2082.boost.splits import _pair, pair_on_device
+
+    rng = np.random.default_rng(0)
+
+    def check(classes, num_pairs):
+        order = rng.permutation(len(classes))
+        permuted = classes[order]
+
+        expected = _pair(order, permuted, num_pairs)
+        actual = pair_on_device(
+            torch.as_tensor(order, device="cuda"),
+            torch.as_tensor(permuted, device="cuda"),
+            num_pairs,
+        )
+
+        assert np.array_equal(expected, actual.cpu().numpy()), (classes, num_pairs)
+
+    for n in (2, 3, 7, 50, 600):
+        for k in (2, 3, 10):
+            for majority in (0.5, 0.9, 0.99):
+                for num_pairs in (1, 2, 4, 8):
+                    classes = np.where(
+                        rng.random(n) < majority, 0, rng.integers(1, k, n)
+                    )
+                    classes[:2] = [0, 1]  # at least two classes, always
+                    check(classes.astype(np.int64), num_pairs)
+
+    lone = np.zeros(300, dtype=np.int64)
+    lone[137] = 1
+    check(lone, 8)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the kernel runs on CUDA")
+def test_splitter_proposes_the_same_on_device_and_host(monkeypatch):
+
+    import fit2082.boost.splits as splits_module
+
+    X, Y, k = _data()
+    X, Y = torch.as_tensor(X, device="cuda"), torch.as_tensor(Y, device="cuda").long()
+    probabilities = torch.softmax(torch.randn(X.shape[0], k, device="cuda"), -1)
+
+    # the pairing reads neither; they are passed for splitters that do
+    unused = torch.empty(0, device="cuda")
+
+    def propose():
+        generator = torch.Generator(device="cuda").manual_seed(3)
+        splitter = HardPairSplitter(generator=generator)
+        return splitter.propose(X, Y, probabilities, unused, unused, 8)
+
+    on_device = propose()
+    monkeypatch.setattr(splits_module, "HAVE_TRITON", False)
+    on_host = propose()
+
+    assert torch.equal(on_device[0], on_host[0])
+    assert torch.equal(on_device[1], on_host[1])
 
 
 @pytest.mark.parametrize("device", DEVICES)
@@ -1041,6 +1175,82 @@ def test_frozen_cache_matches_rereading_frozen_rounds(device, hashes_per_round):
 
     assert torch.allclose(cached.tables.logits, reread.tables.logits, atol=1e-5)
     assert torch.allclose(cached.predict(X), reread.predict(X), atol=1e-4, rtol=1e-4)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("hashes_per_round", [1, 2])
+@pytest.mark.parametrize("window", [None, 7])
+def test_code_cache_matches_reencoding(device, hashes_per_round, window):
+    """Cached codes are the codes, so the model trains exactly as without them.
+
+    Batches come from a fresh permutation each epoch, so rows arrive having
+    cached different numbers of rounds, and with a frozen window the cache has
+    to agree with the frozen-round bookkeeping about where each batch starts.
+    """
+
+    n, batch, epochs = 240, 60, 5
+    X, Y, k = _data(n=n)
+    rounds = epochs * (n // batch) * hashes_per_round
+    make = _random_splitter(rounds, X.shape[1], device)
+
+    def build():
+        return HashBoost(
+            num_classes=k,
+            max_num_hashes=rounds,
+            hashes_per_round=hashes_per_round,
+            device=device,
+            round_chunk=5,
+            active_rounds=window,
+            splitter=make(),
+        )
+
+    cached = build()
+    reencoded = build()
+
+    rng = np.random.default_rng(0)
+
+    for _ in range(epochs):
+        order = rng.permutation(n)
+
+        for start in range(0, n, batch):
+            rows = order[start : start + batch]
+
+            cached.fit_batch(X[rows], Y[rows], rows=rows * 1000 + 7)
+            reencoded.fit_batch(X[rows], Y[rows])
+
+    # the cache was really used, not bypassed
+    assert cached._codes_upto is not None
+    assert int(cached._codes_upto.max()) == rounds
+
+    assert torch.allclose(cached.tables.logits, reencoded.tables.logits, atol=1e-5)
+    assert torch.allclose(cached.predict(X), reencoded.predict(X), atol=1e-4, rtol=1e-4)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_code_cache_respects_its_budget_and_resets(device):
+
+    X, Y, k = _data()
+    rows = np.arange(X.shape[0])
+
+    off = HashBoost(num_classes=k, max_num_hashes=4, device=device, code_cache_bytes=0)
+    off.fit_batch(X, Y, rows=rows)
+    assert off._codes_cache is None
+
+    # 4 rounds x 512 rows of one-byte codes needs 2,048 bytes
+    tight = HashBoost(
+        num_classes=k, max_num_hashes=4, device=device, code_cache_bytes=2047
+    )
+    tight.fit_batch(X, Y, rows=rows)
+    assert tight._codes_cache is None and tight._codes_off
+
+    model = HashBoost(num_classes=k, max_num_hashes=4, device=device)
+    for _ in range(3):
+        model.fit_batch(X, Y, rows=rows)
+    assert model._codes_cache is not None
+
+    # codes of the old splits must not survive a load
+    model.load_state_dict(model.state_dict())
+    assert model._codes_cache is None and model._codes_upto is None
 
 
 @pytest.mark.parametrize("device", DEVICES)

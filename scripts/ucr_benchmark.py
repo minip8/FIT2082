@@ -23,6 +23,17 @@ costs nothing before it.
     uv run python scripts/ucr_benchmark.py --compile --models hashboost \
         --bits 4 --rounds 3200 --label hashboost_b4_r3200
 
+On most of these datasets a HashBoost round leaves the GPU idle, so several
+processes can share it. `--shard i/N` runs every N-th dataset from the i-th:
+
+    for i in 0 1 2; do
+        uv run python scripts/ucr_benchmark.py --compile --shard $i/3 &
+    done; wait
+
+Concurrent shards compete for the GPU and the CPU, so their fit times are not
+comparable with an unsharded run. Each file records its shard, and timing
+claims should come from unsharded runs.
+
 `--stdin` takes the same arguments on a pipe; see `fit2082.cli`.
 """
 
@@ -121,12 +132,18 @@ def main() -> None:
     parser.add_argument(
         "--compile",
         action="store_true",
-        help="torch.compile HashBoost's hash encoding (faster, identical results)",
+        help="torch.compile HashBoost's hash encoding and leaf refresh (faster; "
+        "leaves may differ in the last 2 ulps)",
     )
     parser.add_argument(
         "--skip-done",
         action="store_true",
         help="skip models already in this commit's file for a dataset",
+    )
+    parser.add_argument(
+        "--shard",
+        default=None,
+        help="i/N: run every N-th dataset, starting from the i-th (0-based)",
     )
     parser.add_argument(
         "--device", default="cuda" if torch.cuda.is_available() else "cpu"
@@ -138,6 +155,15 @@ def main() -> None:
         if args.datasets == "all"
         else [resolve(n) for n in args.datasets.split(",")]
     )
+
+    if args.shard is not None:
+        try:
+            index, count = (int(part) for part in args.shard.split("/"))
+        except ValueError:
+            parser.error(f"--shard takes i/N, got {args.shard!r}")
+        if not 0 <= index < count:
+            parser.error(f"--shard {args.shard}: need 0 <= i < N")
+        names = names[index::count]
 
     models = args.models.split(",")
     unknown = [m for m in models if m not in MODELS]
@@ -192,6 +218,8 @@ def main() -> None:
                 "num_classes": num_classes,
             },
             "transform": transform,
+            # concurrent shards share the GPU and CPU: their timings are not clean
+            "shard": args.shard,
         }
 
         line = (

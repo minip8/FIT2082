@@ -26,6 +26,14 @@ class _FrozenRows(NamedTuple):
     upto: torch.Tensor | None  # (n,) rounds cached per row, on the device, if lo < hi
 
 
+class _KnownCodes(NamedTuple):
+    """One batch's view of the code cache; see `HashBoost.fit_batch`."""
+
+    ids: torch.Tensor  # (n,) row ids, on the host
+    index: torch.Tensor  # (n,) the same ids, on the device
+    upto: int  # rounds every row in the batch has cached
+
+
 # == model =====================================================================
 
 
@@ -52,6 +60,12 @@ class HashBoost:
     quadratic total into a linear one. Freezing does change the model -- how
     much depends on the dataset; see the README.
 
+    Given `rows`, each row's hash codes are cached too, up to
+    `code_cache_bytes`, so a batch only encodes the rounds created since its
+    rows were last seen. A round's codes never change once the round exists,
+    so this changes nothing but the cost: on a 50-row batch at 3,000 rounds,
+    re-encoding every round was 1.6 of a 5.6 ms round.
+
     Inputs may be numpy or torch; outputs are always torch tensors on `device`.
     """
 
@@ -73,6 +87,7 @@ class HashBoost:
         shrinkage_tau: float = 0.0,
         generator: torch.Generator | None = None,
         active_rounds: int | None = None,
+        code_cache_bytes: int = 256 << 20,
     ) -> None:
 
         if device is None:
@@ -99,6 +114,16 @@ class HashBoost:
         # and only used with `active_rounds`.
         self._frozen_upto: torch.Tensor | None = None
         self._frozen_logits: torch.Tensor | None = None
+
+        # Per row id: how many leading rounds of its codes are cached (on the
+        # host) and the codes themselves, round-major (on the device). Grown on
+        # demand, and dropped for good once the whole cache -- every round, for
+        # every row id seen -- would outgrow `code_cache_bytes`: a streamed pool
+        # of a million rows never repeats within the window that would pay.
+        self.code_cache_bytes = int(code_cache_bytes)
+        self._codes_upto: torch.Tensor | None = None
+        self._codes_cache: torch.Tensor | None = None
+        self._codes_off = self.code_cache_bytes <= 0
 
         self.objective = objective or SoftmaxObjective(self.num_classes)
 
@@ -143,6 +168,7 @@ class HashBoost:
             neighbour_shrinkage=neighbour_shrinkage,
             shrinkage_tau=shrinkage_tau,
             round_chunk=round_chunk,
+            compile=compile,
         )
 
         self.num_rounds = 0
@@ -165,9 +191,11 @@ class HashBoost:
         """Run `hashes_per_round` rounds of boosting on a (mini)batch.
 
         `rows` is (n,) stable integer ids for the examples -- their indices into
-        the training set, say -- and matters only with `active_rounds`, where it
-        lets each row's frozen rounds be summed once and skipped thereafter.
-        Without it the model trains identically, re-reading frozen rounds.
+        the training set, say. With them each row's codes are cached, so only
+        rounds created since its last visit are encoded, and with
+        `active_rounds` each row's frozen rounds are summed once and skipped
+        thereafter. Without them the model trains identically, re-encoding and
+        re-reading every round.
         """
 
         Xd = self._X(X)
@@ -179,11 +207,14 @@ class HashBoost:
         n = Xd.shape[0]
         r0 = self.num_rounds
 
+        ids, index = (None, None) if rows is None else self._row_index(rows, n)
+
         # Each row's logits summed over its first `upto` rounds, cached when
         # those rounds froze. Rows last seen at different times disagree on
         # `upto`, but no row in the batch needs any round below the least of
         # them, `lo`.
-        cache = self._recall_frozen(rows, n)
+        cache = self._recall_frozen(ids, index)
+        known = self._recall_codes(ids, index)
 
         frozen = None if cache is None else cache.logits
         upto = None if cache is None else cache.upto
@@ -202,7 +233,17 @@ class HashBoost:
         )
 
         if r0 > base:
-            codes[: r0 - base] = self.partitioner.encode(Xt, base, r0)
+            # rounds every row has cached come from the cache; the rest, which
+            # some rows may have cached too, are encoded afresh -- a round's
+            # codes are the same however often they are computed
+            start = base
+
+            if known is not None and known.upto > base:
+                start = min(known.upto, r0)
+                codes[: start - base] = self._codes_of(base, start, known.index)
+
+            if r0 > start:
+                codes[start - base : r0 - base] = self.partitioner.encode(Xt, start, r0)
 
         for _ in range(self.hashes_per_round):
             if self.num_rounds >= self.max_num_hashes:
@@ -267,6 +308,9 @@ class HashBoost:
 
             self._remember_frozen(cache, lo, frozen)
 
+        if known is not None:
+            self._remember_codes(known, codes, base)
+
         return self
 
     # -- frozen rounds ---------------------------------------------------------
@@ -279,27 +323,35 @@ class HashBoost:
 
         return max(0, num_rounds - self.active_rounds)
 
-    def _recall_frozen(self, rows: Array | None, n: int) -> _FrozenRows | None:
-        """-> this batch's view of the frozen-round cache, or None without one.
+    def _row_index(self, rows: Array, n: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """-> the batch's row ids on the host, and the same ids on the device.
 
-        There is no cache without both `rows` and `active_rounds`. A row never
-        seen before has summed zero rounds, to zero logits.
-
-        The per-row round counts live on the host. `lo` decides which rounds
-        get encoded, so reading it off the device would stall the host on the
-        GPU queue every batch -- measured, that cost more than the cache saved.
-        Row ids already on the GPU cost one such stall to bring back, so pass
-        them from the host.
+        The per-row round counts of both caches live on the host. They decide
+        which rounds get encoded, so reading them off the device would stall
+        the host on the GPU queue every batch -- measured, that cost more than
+        the frozen cache saved. Row ids already on the GPU cost one such stall
+        to bring back, so pass them from the host.
         """
-
-        if rows is None or self.active_rounds is None:
-            return None
 
         ids = rows.detach().cpu() if isinstance(rows, torch.Tensor) else rows
         ids = torch.as_tensor(ids).to(torch.int64).reshape(-1)
 
         if ids.shape[0] != n:
             raise ValueError(f"got {ids.shape[0]} row ids for {n} examples")
+
+        return ids, self._to_device(ids)
+
+    def _recall_frozen(
+        self, ids: torch.Tensor | None, index: torch.Tensor | None
+    ) -> _FrozenRows | None:
+        """-> this batch's view of the frozen-round cache, or None without one.
+
+        There is no cache without both `rows` and `active_rounds`. A row never
+        seen before has summed zero rounds, to zero logits.
+        """
+
+        if ids is None or index is None or self.active_rounds is None:
+            return None
 
         size = 0 if self._frozen_upto is None else self._frozen_upto.shape[0]
         needed = int(ids.max()) + 1
@@ -324,8 +376,6 @@ class HashBoost:
         counts = self._frozen_upto[ids]
         lo, hi = int(counts.min()), int(counts.max())
 
-        index = self._to_device(ids)
-
         return _FrozenRows(
             ids=ids,
             index=index,
@@ -343,6 +393,75 @@ class HashBoost:
 
         self._frozen_upto[cache.ids] = upto
         self._frozen_logits[cache.index] = logits
+
+    # -- cached codes ----------------------------------------------------------
+
+    def _recall_codes(
+        self, ids: torch.Tensor | None, index: torch.Tensor | None
+    ) -> _KnownCodes | None:
+        """-> this batch's view of the code cache, or None without one."""
+
+        if ids is None or index is None or self._codes_off:
+            return None
+
+        size = 0 if self._codes_upto is None else self._codes_upto.shape[0]
+        needed = int(ids.max()) + 1
+
+        if needed > size:
+            grown = max(needed, 2 * size)
+            dtype = code_dtype(self.num_bits)
+            width = torch.empty((), dtype=dtype).element_size()
+
+            if self.max_num_hashes * grown * width > self.code_cache_bytes:
+                self._codes_upto = self._codes_cache = None
+                self._codes_off = True
+                return None
+
+            upto = torch.zeros(grown, dtype=torch.int64)
+            codes = torch.zeros(
+                (self.max_num_hashes, grown), dtype=dtype, device=self.device
+            )
+
+            if self._codes_upto is not None and self._codes_cache is not None:
+                upto[:size] = self._codes_upto
+                codes[:, :size] = self._codes_cache
+
+            self._codes_upto, self._codes_cache = upto, codes
+
+        assert self._codes_upto is not None
+
+        return _KnownCodes(ids=ids, index=index, upto=int(self._codes_upto[ids].min()))
+
+    def _codes_of(self, lo: int, hi: int, index: torch.Tensor) -> torch.Tensor:
+        """-> (hi - lo, n) cached codes of rounds [lo, hi) for the given rows."""
+
+        assert self._codes_cache is not None
+
+        return self._codes_cache[lo:hi].index_select(1, index)
+
+    def _remember_codes(
+        self, known: _KnownCodes, codes: torch.Tensor, base: int
+    ) -> None:
+        """Store what this batch encoded beyond what every row had cached.
+
+        `codes` starts at round `base`. The cache only ever holds a prefix of
+        each row's rounds, so rows whose cache ends before `base` -- rounds this
+        batch never needed -- are left as they are.
+        """
+
+        assert self._codes_upto is not None and self._codes_cache is not None
+
+        if known.upto < base:
+            return
+
+        lo, hi = known.upto, self.num_rounds
+
+        if hi > lo:
+            self._codes_cache[lo:hi].index_copy_(
+                1, known.index, codes[lo - base : hi - base]
+            )
+
+        self._codes_upto[known.ids] = hi
 
     def _to_device(self, host: torch.Tensor) -> torch.Tensor:
         """Copy a host tensor to the device without waiting on the GPU queue.
@@ -473,9 +592,11 @@ class HashBoost:
         for name, value in state["partitioner"].items():
             getattr(self.partitioner, name).copy_(value.to(self.device))
 
-        # cached sums of the old tables' rounds would be wrong for the new ones
+        # cached sums and codes of the old rounds would be wrong for the new
         self._frozen_upto = None
         self._frozen_logits = None
+        self._codes_upto = None
+        self._codes_cache = None
 
         return self
 
