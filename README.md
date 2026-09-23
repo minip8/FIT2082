@@ -2,6 +2,162 @@
 
 ## Benchmarks
 
+### ucr
+
+Two things on this branch. Every model is now scored on the same MONSTER rows,
+and default HashBoost has been benchmarked on the UCR archive: the 112
+datasets the TSC bake-off uses, against QUANT's own classifier and XGBoost.
+Following the decision to evaluate the default model for now, everything
+here is default HashBoost (8 bits, lr 0.1), not the tuned ensembles above.
+`notebooks/ucr.ipynb` has the figures and the statistics.
+
+#### One split for every model: seed 42 (f1cfcef)
+
+`experiment.py` drew its train/validation split with seed 123, while every
+tree baseline (`notebooks/compare.ipynb`, `scripts/xgboost_baseline.py`) and
+every streamed run (`scripts/stream_full.py`) drew seed 42. So each sweep
+above was trained **and validated** on different rows from the XGBoost numbers
+it was set against. With 4,096 validation rows the binomial standard error
+alone is about 0.006 at Pedestrian's error rate, larger than several of the
+gaps quoted against XGBoost.
+
+`load_split` now defaults to seed 42. I captured the indices each code path
+asks the memmap for, and they are identical to `xgboost_baseline.load_raw`'s
+for Pedestrian (65,536 + 4,096) and InsectSound (32,768 + 4,096). The tune
+slice becomes the "te" slice that `compare.ipynb` and `stream_full.py` hold
+back and never score. `--split-seed 123` reproduces every sweep above. Those
+sweeps are still comparable with each other, but not row for row with
+anything from here on.
+
+Default HashBoost, rerun on the baselines' rows (`--variants baseline --seeds 1
+--compile`, one run each):
+
+| dataset | rounds | val error | earlier run, same rows | best tree | wall | peak GPU |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Pedestrian | 800 | 0.2356 | 0.2253 | 0.2041 (XGBoost) | 13.9 s | 300 MB |
+| InsectSound | 400 | 0.2712 | 0.2759 | 0.1887 (XGBoost) | 4.0 s | 1,003 MB |
+| LenDB | 800 | 0.0591 | 0.0569 | 0.0459 (XGBoost) | 8.6 s | 4,696 MB |
+| Tiselac | 800 | 0.0818 | 0.0779 | 0.0632 (LightGBM) | 4.0 s | 689 MB |
+| Traffic | 800 | 0.4365 | 0.4404 | 0.3936 (LightGBM) | 3.4 s | 114 MB |
+
+"Earlier run" is the final error of the `compare.ipynb` HashBoost on the same
+rows (older code, same maths). Four datasets agree within 0.005. Pedestrian's
+two runs differ by 0.010: that is two single runs of the chaotic dataset, and
+it needs more seeds before either number is quoted alone. The tree figures are
+the best point on each validation curve, which flatters the trees. Pedestrian
+ran first, so its wall time includes compiling the encoder, which
+`hashboost-screen` measured at about 5.5 s cold (the compiled baseline took
+about 7.5 s there). LenDB's peak is mostly the cached 65,536 x 14,940 feature
+matrix.
+
+#### UCR 112: default HashBoost against ExtraTrees and XGBoost (84ac59c)
+
+    uv run python scripts/ucr_benchmark.py --compile
+
+The datasets are the archive's 128 less the 15 with missing values or variable
+lengths, and less Fungi (one training series per class): exactly the 112 the
+bake-off publishes default-split results for. Each runs on its **default
+train/test split**. QUANT runs once on the GPU, and three models train on the
+same features:
+
+* **HashBoost:** the MONSTER default for a fixed **800 rounds**, in batches of
+  at most 4,096 rows cycled until the budget is spent. 27 training sets have
+  50 rows or fewer, so the runner's 50 epochs would have meant 50 rounds.
+* **ExtraTrees:** QUANT's own classifier (`QuantClassifier`'s settings: 200
+  trees, entropy, `max_features` 0.1), on 12 CPU threads.
+* **XGBoost:** library defaults (100 rounds, eta 0.3, depth 6), on the GPU.
+
+UCR has no validation split, so nothing is tuned or early-stopped, and the
+number is each finished model's **test error**. It is **one run per cell**.
+The bake-off averages 30 resamples; this is resample 0 only.
+
+**The pipeline reproduces published QUANT.** Our ExtraTrees scores a mean
+error of 0.1475 against published QUANT's 0.1456 on the same default splits,
+with correlation 0.996 across datasets. 100 of the 112 agree within 0.02, the
+other 12 split six each way, and the widest gap (Ham, 0.048) is five of its
+105 test series. That checks `load_ucr` and the torch QUANT port on data they
+had never seen.
+
+All 112 datasets. W/T/L is HashBoost's record against the row (lower, equal,
+higher error). p is a two-sided Wilcoxon signed-rank test against HashBoost,
+Holm-adjusted over the four comparisons:
+
+| model | mean error | median | mean rank | HashBoost W/T/L | p (Holm) | fit, all 112 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| HashBoost | 0.1941 | 0.1705 | 2.36 | | | 183 s |
+| ExtraTrees | **0.1475** | 0.1205 | **1.25** | 8/8/96 | 2.6e-14 | 70 s |
+| XGBoost | 0.2101 | 0.1912 | 2.39 | 58/3/51 | 0.082 | 413 s |
+| *QUANT (published)* | *0.1456* | *0.1177* | | *13/5/94* | *4.9e-14* | |
+| *HC2 (published)* | *0.1236* | *0.0753* | | *8/7/97* | *3.8e-15* | |
+
+Friedman p = 3.6e-22 over the three models, and the Nemenyi critical
+difference is 0.31. **ExtraTrees is significantly better than both boosters,
+and HashBoost and XGBoost are not significantly different** (ranks 2.36 and
+2.39).
+
+**HashBoost's record against XGBoost depends on size. Against ExtraTrees it
+loses in every size band:**
+
+| training rows | datasets | vs ExtraTrees | vs XGBoost | HashBoost | ExtraTrees | XGBoost |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| <= 50 | 27 | 3/0/24 | 19/1/7 | 0.1141 | 0.0646 | 0.1841 |
+| 51-200 | 31 | 2/4/25 | 20/1/10 | 0.1981 | 0.1404 | 0.2198 |
+| 201-999 | 43 | 2/4/37 | 16/1/26 | 0.2598 | 0.2176 | 0.2461 |
+| 1,000+ | 11 | 1/0/10 | 3/0/8 | 0.1225 | 0.0973 | 0.1054 |
+
+XGBoost's defaults do badly on the smallest sets, and that is where all of
+HashBoost's lead over it comes from. With at most 200 training rows HashBoost
+wins 39 and loses 17. Above that it wins 19 and loses 34. On the 11 datasets with 1,000 or more
+training rows HashBoost is behind both (Friedman p = 0.012; Holm p 0.012 against
+ExtraTrees and 0.032 against XGBoost). The HashBoost-ExtraTrees gap
+correlates more with the number of classes (r = 0.31) than with training size
+(r = -0.11). The widest gaps are Wine (0.31, 57 rows), EthanolLevel (0.29) and
+the three Pig datasets (52 classes, 104 rows: two series per class).
+
+The 11 large datasets:
+
+| dataset | train | classes | features | HashBoost | ExtraTrees | XGBoost | fit s (HB / ET / XGB) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| ElectricDevices | 8,926 | 7 | 994 | 0.2812 | **0.2570** | 0.2604 | 2.2 / 4.4 / 7.7 |
+| Crop | 7,200 | 24 | 491 | 0.2230 | **0.2227** | 0.2258 | 2.3 / 1.1 / 11.1 |
+| FordB | 3,636 | 2 | 4,469 | 0.2716 | **0.1975** | 0.2025 | 2.5 / 5.9 / 3.2 |
+| FordA | 3,601 | 2 | 4,469 | 0.0598 | 0.0295 | **0.0273** | 2.4 / 5.3 / 3.2 |
+| NonInvasiveFetalECGThorax1 | 1,800 | 42 | 6,684 | 0.1069 | **0.0672** | 0.0936 | 2.8 / 4.2 / 30.4 |
+| NonInvasiveFetalECGThorax2 | 1,800 | 42 | 6,684 | 0.0809 | **0.0504** | 0.0758 | 2.8 / 3.9 / 29.3 |
+| PhalangesOutlinesCorrect | 1,800 | 2 | 900 | 0.1760 | **0.1527** | 0.1807 | 1.6 / 0.4 / 0.9 |
+| HandOutlines | 1,000 | 2 | 24,015 | 0.0919 | 0.0730 | **0.0703** | 2.2 / 9.8 / 10.4 |
+| StarLightCurves | 1,000 | 3 | 8,994 | **0.0193** | 0.0205 | 0.0204 | 1.7 / 1.6 / 3.8 |
+| TwoPatterns | 1,000 | 4 | 1,160 | 0.0350 | **0.0000** | 0.0018 | 1.6 / 0.3 / 1.2 |
+| Wafer | 1,000 | 2 | 1,572 | 0.0018 | **0.0000** | 0.0008 | 1.5 / 0.2 / 0.2 |
+
+**Cost.** This is fit time only; the QUANT transform is shared and not
+counted. HashBoost's fixed budget makes its fit time almost independent of
+the dataset: 1.4 to 2.8 s everywhere, median 1.6 s, because a set that fits in
+one batch is re-accumulated every round. ExtraTrees takes 0.2 s on most small
+sets. On the 11 large sets HashBoost is the fastest in total (24 s against
+37 s and 101 s), though ExtraTrees is quicker on five of them. XGBoost's cost
+grows with the class count, because it trains one tree per class per round,
+and with the feature count. Its slowest fits are the two 42-class
+NonInvasiveFetalECG sets (30 s each), Phoneme (39 classes, 23 s) and ShapesAll
+(60 classes, 17 s). Peak GPU memory for
+HashBoost is 681 MB at most (median 32 MB).
+
+**800 rounds is not a ceiling.** Mean test error still falls with rounds:
+0.222, 0.210, 0.202, 0.198 and 0.194 at 100, 200, 400, 600 and 800 rounds. On
+the large 11 it goes from 0.154 to 0.123. It is lower at 800 than at 400 on 73
+of the 112 datasets, and higher on 16. HashBoost reaches zero training error
+on 111 of the 112 and keeps improving on test afterwards. These curves were
+recorded for plotting only, and nothing was chosen on them. They say a longer
+budget would help, but choosing it needs a validation split carved from
+training.
+
+What to take from it: **on UCR, default HashBoost is level with default XGBoost
+and clearly behind QUANT's ExtraTrees**, whose 200 averaged random trees suit
+training sets this small. The one place HashBoost leads on cost is the large
+sets, where it is also least accurate. Obvious next steps, none of them tried:
+fewer bits on tiny sets (256 buckets for 20 training rows), a longer budget
+chosen on held-out training rows, and bagging, which helped on Pedestrian.
+
 ### pulsar
 
 PULSAR (Cabello & Kulik, ICDM 2025) as a second feature transform, ported to

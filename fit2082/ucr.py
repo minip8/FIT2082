@@ -15,7 +15,7 @@ there is no validation slice to choose on, which is why every model runs at
 fixed settings: HashBoost at the MONSTER default, the baselines at their
 library defaults.
 
-Most UCR training sets are smaller than one 4,096-row batch -- 28 of the 112
+Most UCR training sets are smaller than one 4,096-row batch -- 27 of the 112
 have 50 rows or fewer -- so HashBoost's budget is set in rounds, not epochs:
 50 epochs would be 50 rounds for any set that fits in one batch.
 """
