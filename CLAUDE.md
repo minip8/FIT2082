@@ -21,7 +21,7 @@ of the design (chunking, streaming, page-cache eviction).
 
 Everything runs through `uv` (Python 3.12).
 
-    uv run pytest                                   # 164 tests; CUDA-only ones skip without a GPU
+    uv run pytest                                   # 183 tests; CUDA-only ones skip without a GPU
     uv run pytest tests/test_boost.py::test_name    # single test
     uv run ruff check . && uv run ruff format .
     uv run ty check
@@ -36,6 +36,7 @@ Everything runs through `uv` (Python 3.12).
     uv run python scripts/ucr_benchmark.py --compile   # UCR 112: HashBoost, ExtraTrees, XGBoost
     uv run python scripts/ucr_benchmark.py --compile --models hashboost --bits 2 \
         --rounds 3200 --label hb_b2_r3200            # a HashBoost variant beside the rest
+    uv run python scripts/ucr_benchmark.py --compile --shard 0/3   # 1 of 3 concurrent shards
 
 `--compile` (torch.compile the hash encoding and the leaf refresh) is faster
 but costs a few seconds on first use. The encoding is exact; the fused refresh
@@ -53,14 +54,22 @@ can round a leaf differently in its last 2 ulps, well below run-to-run noise. Sc
   per batch grows linearly with the number of rounds, and that growth is the
   scaling bottleneck. `active_rounds` freezes rounds older than a window. If you
   pass `rows=` (stable row ids, kept on the host to avoid GPU syncs), each row's
-  frozen contribution is cached.
+  hash codes are cached (up to `code_cache_bytes`), so a batch only encodes new
+  rounds, and with `active_rounds` its frozen contribution is cached too. On
+  small batches a round is launch overhead, not arithmetic: see the README's
+  `cheaper-rounds` section before adding per-round kernels.
 - `tables.py`: the performance core (encode/predict/accumulate/refresh_logits).
   The layout notes in its docstring are load-bearing: codes are round-major
   `(rounds, n)`, and gradient plus hessian are fused into one `stats` tensor.
+  Prediction picks gather-and-sum or `embedding_bag` by batch shape
+  (`GATHER_LIMIT`), and with `compile=True` the refresh is one fused kernel.
 - `partition.py`: `Partitioner` owns the predicate family, its parameter
   storage and its encoder (axis-aligned or oblique).
 - `splits.py`: a `Splitter` chooses the members of that family
-  (`HardPairSplitter`, with `sample=True` for Gumbel-sampled pairs).
+  (`HardPairSplitter`, with `sample=True` for Gumbel-sampled pairs). On CUDA
+  the greedy pairing runs as a one-thread Triton kernel (`pair_on_device`), so
+  a round needs no host sync. It must stay pair-for-pair equal to `_pair`,
+  and a test checks this.
 - `objective.py`: maps logits to (gradient, hessian).
 - `ensemble.py`: `BaggedHashBoost` with per-member `overrides`.
 - `readout.py`: refits the leaf tables jointly after boosting.
