@@ -34,6 +34,8 @@ Everything runs through `uv` (Python 3.12).
     uv run python scripts/stream_full.py --dataset LenDB --model hashboost --epochs 5
     uv run python scripts/xgboost_baseline.py --dataset LenDB
     uv run python scripts/ucr_benchmark.py --compile   # UCR 112: HashBoost, ExtraTrees, XGBoost
+    uv run python scripts/ucr_benchmark.py --compile --models hashboost --bits 2 \
+        --rounds 3200 --label hb_b2_r3200            # a HashBoost variant beside the rest
 
 `--compile` (torch.compile the hash encoding) gives identical results and is
 faster, but costs a few seconds on first use. Scripts under `scripts/` accept

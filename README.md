@@ -154,9 +154,89 @@ training.
 What to take from it: **on UCR, default HashBoost is level with default XGBoost
 and clearly behind QUANT's ExtraTrees**, whose 200 averaged random trees suit
 training sets this small. The one place HashBoost leads on cost is the large
-sets, where it is also least accurate. Obvious next steps, none of them tried:
-fewer bits on tiny sets (256 buckets for 20 training rows), a longer budget
-chosen on held-out training rows, and bagging, which helped on Pedestrian.
+sets, where it is also least accurate. The obvious next steps were fewer
+bits on tiny sets (256 buckets for 20 training rows), a longer budget, and
+bagging, which helped on Pedestrian. The next section tries the first two.
+
+#### Bits and rounds on UCR (eb898d0)
+
+    for r in 800 3200; do for b in 8 6 4 2; do
+        uv run python scripts/ucr_benchmark.py --compile --models hashboost \
+            --bits $b --rounds $r --label hb_b${b}_r${r}
+    done; done
+
+This is a grid over the two cheapest settings, with the default (8 bits, 800
+rounds) rerun in the same sweep as the control, one run per cell and nothing
+else changed. `fit_hashboost` now takes `num_bits`, and the runner takes
+`--bits` and `--label`. UCR has no validation split, so this is a
+**sensitivity study on the test sets**: it shows how error moves, and the best
+cell's own number is optimistic. Mean test error over the 112:
+
+| bits | 800 rounds | 3,200 rounds |
+| ---: | ---: | ---: |
+| 8 (default) | 0.1956 (control) | 0.1885 |
+| 6 | 0.1844 | 0.1808 |
+| 4 | 0.1767 | 0.1712 |
+| 2 | 0.1750 | **0.1647** |
+
+* **The control moved little.** It reads 0.1956 against the first run's
+  0.1941. The rerun changed 41 of the 112 datasets, with a mean absolute
+  change of 0.0036 over all 112 and no systematic direction (Wilcoxon
+  p = 0.21). That is the floor.
+* **Every other cell beats the control** (Holm p at most 5.2e-7). The W/T/L
+  records against it run from 70/23/19 (8 bits, 3,200 rounds) to 92/9/11 (4
+  bits, 3,200 rounds).
+* **Fewer bits help most, and more rounds help most at few bits:** 2 bits
+  gains 0.010 from the extra rounds, and 6 bits only 0.004. Within the 2-bit
+  runs the prefix error is flattening (0.1689, 0.1658, 0.1647 at 1,600, 2,400
+  and 3,200 rounds). A 3,200-round run's first 1,600 rounds are not a
+  1,600-round run, because later batches keep updating early rounds.
+* **The best width grows with the training set,** as the bucket argument says
+  it should. At 3,200 rounds:
+
+  | training rows | 2 bits | 4 bits | 6 bits | 8 bits |
+  | --- | ---: | ---: | ---: | ---: |
+  | <= 50 | **0.0759** | 0.0852 | 0.1020 | 0.1057 |
+  | 51-200 | **0.1636** | 0.1729 | 0.1810 | 0.1913 |
+  | 201-999 | **0.2353** | 0.2409 | 0.2477 | 0.2564 |
+  | 1,000+ | 0.1101 | **0.1050** | 0.1126 | 0.1181 |
+
+  What matters is rows per class, not just rows. The gain from 8 to 2 bits at
+  800 rounds correlates with log(n/k) at r = -0.34. The 42-class
+  NonInvasiveFetalECG sets have 1,800 rows each and went from 0.1084 and
+  0.0830 at the control to 0.0718 and 0.0575 at 2 bits and 3,200 rounds. On
+  the large sets 4 bits (3,200 rounds) wins: FordB goes from 0.2716 to 0.2210,
+  and Crop to 0.2149, below both baselines' 0.2227 and 0.2258.
+* **Choosing without reading the scored test sets.** I chose the cell on one
+  seeded random half of the datasets and scored it on the other, both ways
+  round. Both halves chose 2 bits and 3,200 rounds. Against the baselines on
+  the same features:
+
+  | model | mean error | cross-validated choice W/T/L | p (Holm) |
+  | --- | ---: | ---: | ---: |
+  | HashBoost, 2 bits, 3,200 rounds | 0.1647 | | |
+  | HashBoost default (control) | 0.1956 | 89/9/14 | 1.4e-12 |
+  | ExtraTrees | **0.1475** | 28/21/63 | 1.2e-05 |
+  | XGBoost | 0.2101 | 82/1/29 | 4.5e-08 |
+
+  So the tuned HashBoost is now **significantly ahead of default XGBoost and
+  still significantly behind ExtraTrees**, and the gap to ExtraTrees shrinks
+  from 0.048 to 0.017.
+* **Bits are free, rounds are not.** On sets this small the cost is per-round
+  overhead, not data. The four 800-round cells take 179-188 s over all 112 at
+  any width, and the 3,200-round cells take 1,329-1,413 s (median 11.6 s a
+  dataset against 1.6 s). So **2 bits at 800 rounds is a 0.021 improvement
+  at no extra cost**, and 3,200 rounds buys another 0.010 at 7.5 times the
+  time. ExtraTrees takes 70 s on the CPU for all 112.
+
+The 3,200-round cost is per-round overhead, not arithmetic. It barely
+depends on bits or rows: at 8 bits GunPoint's 50 rows took 10.4 s and
+ElectricDevices' 8,926 took 16.3 s. Every batch re-encodes, re-predicts and
+refreshes every existing round in chunks, and makes one host sync to pair
+examples. The likely cost is those launches and that sync, which has not been
+profiled. Cutting them, with larger chunks or frozen rounds, is what would make
+long budgets affordable here. Not tried: 1 bit (stumps), budgets past
+3,200, a width chosen per dataset from rows per class, and bagging.
 
 ### pulsar
 
