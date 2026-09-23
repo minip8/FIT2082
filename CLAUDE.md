@@ -7,8 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 FIT2082 research project: **HashBoost**, gradient boosting over random hash
 partitions ("Global Partitions for Boosting Time Series Classification", see
 `spec/spec.tex`), GPU-resident in torch, benchmarked on MONSTER time-series
-datasets (Pedestrian, InsectSound, LenDB, Tiselac, Traffic) after a QUANT feature
-transform, against XGBoost/LightGBM/CatBoost. `README.md` is the lab notebook:
+datasets (Pedestrian, InsectSound, LenDB, Tiselac, Traffic) and the UCR 112 after
+a QUANT feature transform, against XGBoost/LightGBM/CatBoost and QUANT's own
+ExtraTrees. The paper draft is `paper/paper.tex`. `README.md` is the lab notebook:
 one section per commit or branch, holding measured results, the commands that
 produced them and practical notes. Read the relevant section before changing a
 component, because it records what has already been tried and what failed.
@@ -20,7 +21,7 @@ of the design (chunking, streaming, page-cache eviction).
 
 Everything runs through `uv` (Python 3.12).
 
-    uv run pytest                                   # 153 tests; CUDA-only ones skip without a GPU
+    uv run pytest                                   # 164 tests; CUDA-only ones skip without a GPU
     uv run pytest tests/test_boost.py::test_name    # single test
     uv run ruff check . && uv run ruff format .
     uv run ty check
@@ -32,6 +33,9 @@ Everything runs through `uv` (Python 3.12).
     uv run python -m fit2082.boost.benchmark        # torch vs numba reference
     uv run python scripts/stream_full.py --dataset LenDB --model hashboost --epochs 5
     uv run python scripts/xgboost_baseline.py --dataset LenDB
+    uv run python scripts/ucr_benchmark.py --compile   # UCR 112: HashBoost, ExtraTrees, XGBoost
+    uv run python scripts/ucr_benchmark.py --compile --models hashboost --bits 2 \
+        --rounds 3200 --label hb_b2_r3200            # a HashBoost variant beside the rest
 
 `--compile` (torch.compile the hash encoding) gives identical results and is
 faster, but costs a few seconds on first use. Scripts under `scripts/` accept
@@ -82,6 +86,12 @@ Also:
   code. Unlike QUANT it is supervised: `Pulsar().fit(batches)` needs labels.
   `--transform pulsar` selects it in `experiment.py` and `scripts/stream_full.py`
   (the latter fits it in one labelled pass over `--fit-rows` first).
+- `fit2082/ucr.py`: the UCR archive. `UCR112` is the bake-off's 112 datasets,
+  `load_ucr` reads one on its default train/test split, and `fit_hashboost`,
+  `fit_extratrees` and `fit_xgboost` train at fixed settings: there is no
+  validation split, so nothing is chosen after training. HashBoost's budget is
+  800 rounds, not 50 epochs, because most UCR training sets fit in one batch.
+  `scripts/ucr_benchmark.py` runs them, and `notebooks/ucr.ipynb` ranks them.
 - `fit2082/results.py`: shared result-file schema
   (`{commit, dataset, device, split, transform, models: {...}}`) and
   GPU/host memory probes. The notebooks read these files.
@@ -93,7 +103,10 @@ Also:
   (`compare.ipynb` is the exception: it produced the off-the-shelf baselines).
 
 Data layout: `data/<Name>/<Name>_X.npy`, `<Name>_y.npy`,
-`test_indices_fold_0.txt`. `data/` and `results/` are gitignored.
+`test_indices_fold_0.txt` for MONSTER, and the unzipped UCR 2018 archive at
+`data/UCRArchive_2018/<Name>/<Name>_{TRAIN,TEST}.tsv` (label in the first
+column). `data/` and `results/` are gitignored; UCR results go to
+`results/UCR/<Name>-<commit>.json`.
 
 ## Experimental standards
 
@@ -104,9 +117,14 @@ Data layout: `data/<Name>/<Name>_X.npy`, `<Name>_y.npy`,
   when a result matters). Say that a number comes from one seed, and do not
   read a gap under ~0.006 on Pedestrian as a result.
 - Quote validation error against `X_va`. Anything chosen after training
-  (early stopping, readout `lam`) must use the separate `X_tune` slice.
+  (early stopping, readout `lam`) must use the separate `X_tune` slice. UCR is
+  the exception: it has only train and test, so UCR runs choose nothing and
+  quote test error on the default split.
 - Keep train and validation splits byte-identical to earlier runs (fixed seed
-  123, fold 0), so that results stay comparable across commits.
+  42, fold 0), so that results stay comparable across commits. Seed 42 gives
+  the rows the tree baselines and streamed runs use. `experiment.py` sweeps made
+  before the `ucr` branch drew seed 123, a different split, so compare them only
+  with each other (`--split-seed 123` reproduces them).
 
 ## Conventions
 
