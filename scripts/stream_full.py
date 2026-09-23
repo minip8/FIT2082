@@ -176,8 +176,9 @@ class RawStream:
         # sorted 4,096-row batch -- but leave it on anyway: sorting the batch
         # makes the pattern semi-sequential, and the kernel's bulk fetches are
         # 20x *faster* than the page-at-a-time faulting MADV_RANDOM gives
-        # (78 ms/batch against 1571 ms). The read amplification is paid for by
-        # dropping the cache periodically, not by defeating readahead.
+        # (78 ms/batch against 1571 ms). The page cache absorbs the read
+        # amplification instead: the first batch reads most of the file, and
+        # later batches mostly hit it.
         #
         # MADV_RANDOM is offered for the memory-starved case. Note the advice
         # has to go on the *mapping*: these reads are page faults through the
@@ -192,21 +193,31 @@ class RawStream:
 
         self._rng = np.random.default_rng(seed)
 
-    def drop_cache(self) -> None:
-        """Hand the pages we have already consumed back to the kernel.
+    def unmap(self) -> None:
+        """Hand our mappings of the series back, but keep them in the page cache.
 
-        A LenDB epoch pulls 6.3 GB of an 8.1 GB file through the page cache,
-        which on a 7.9 GB machine leaves `free` at a few hundred MB. The pages
-        are clean and reclaimable, so nothing is actually short of memory -- but
-        enough things watch `free` rather than `available` that the run gets
-        killed anyway. MADV_DONTNEED drops them outright; re-reading costs the 64
-        ms/batch that the sorted access pattern already assumes.
+        Every `drop_cache_every` batches. MADV_DONTNEED on a shared file mapping
+        only drops our page table entries, so RSS falls back (over a LenDB
+        epoch, median 4.8 GB against 6.7 GB when never unmapped) while the pages
+        stay cached and later batches still find them without the disk.
         """
 
-        # MADV_DONTNEED on a shared file mapping only zaps our page table
-        # entries -- the page cache keeps the pages, and MemFree stays low.
-        # Dropping the PTEs first is what then lets fadvise evict them.
         self._X._mmap.madvise(mmap.MADV_DONTNEED)
+
+    def drop_cache(self) -> None:
+        """Evict the series from the page cache too, for a cold start.
+
+        Not every N batches, though that is what this did first. With the disk's
+        8 MB of readahead and a batch's rows about 2 MB apart, the first batch
+        after an eviction reads 6.3 GB -- nearly the whole LenDB pool -- in
+        about 5 s. Evicting every 50 batches made an epoch read 39.5 GB in 37 s,
+        where unmapping reads 6.5 GB in 11 s, and it bought nothing: MemFree
+        sat at the same ~120 MB floor either way, since the next batch refilled
+        the cache, and peak RSS was no lower.
+        """
+
+        # dropping our page table entries first is what lets fadvise evict them
+        self.unmap()
         os.posix_fadvise(self._fd, 0, 0, os.POSIX_FADV_DONTNEED)
 
     def __len__(self) -> int:
@@ -238,7 +249,7 @@ class RawStream:
             )
 
             if self.drop_cache_every and (i + 1) % self.drop_cache_every == 0:
-                self.drop_cache()
+                self.unmap()
 
     def epochs(self, count: int) -> Iterator[RawBatch]:
         """`with_rows` for `count` epochs back to back, each with its own shuffle."""
@@ -257,11 +268,12 @@ class RawStream:
 class Prefetch:
     """Read batches in a background thread while the GPU trains on earlier ones.
 
-    A LenDB batch takes about as long to read out of the memmap (117 ms) as to
-    transform on the GPU (125 ms), and the two use different hardware. NumPy
-    lets go of the GIL while it copies rows out of the memmap: over 40 LenDB
-    batches, reading and QUANT together took 7.6 s against 13.7 s one after
-    the other, and QUANT itself slowed by 6%.
+    Reading uses the disk and CPU and training the GPU, and NumPy lets go of
+    the GIL while it copies rows out of the memmap: over 40 LenDB batches,
+    reading and QUANT together took 7.6 s against 13.7 s one after the other.
+    It hides only what fits behind the GPU's work on a batch, though. A read
+    that stalls for seconds -- like the 6.3 GB refill after an eviction, which
+    `RawStream.drop_cache` explains -- is still waited for.
 
     Batches arrive in the iterator's own order, so the model sees exactly what
     it would have seen serially. `depth` reads run ahead of the training loop,
@@ -303,14 +315,15 @@ class Prefetch:
 
 
 def auto_drop_cache_every(path_X: str, every: int = 50) -> int:
-    """Evict the page cache only for a file large enough to crowd host RAM.
+    """Manage the page cache only for a file large enough to crowd host RAM.
 
-    Dropping the cache is what keeps a LenDB-sized run alive, but it is pure
-    loss on a dataset that fits: Pedestrian's series are 18 MB, so the kernel
-    would happily hold the whole file for the length of the run and re-reading
-    it every 50 batches buys nothing. Compare the file against what the machine
-    can actually spare rather than against a fixed threshold -- the same dataset
-    is worth streaming carefully on a small box and not on a large one.
+    For such a file, the run evicts it once at startup and unmaps it every
+    `every` batches (`RawStream.unmap`). Neither is worth anything on a dataset
+    that fits: Pedestrian's series are 18 MB, so the kernel would happily hold
+    the whole file for the length of the run. Compare the file against what
+    the machine can actually spare rather than against a fixed threshold --
+    the same dataset is worth streaming carefully on a small box and not on a
+    large one.
     """
 
     size_mb = Path(path_X).stat().st_size / 1e6
@@ -682,8 +695,8 @@ class StreamedFeatures(xgb.DataIter):
         self._batches_seen += 1
 
         if self._drop_cache_every and self._batches_seen % self._drop_cache_every == 0:
-            # the input's own pages are dropped by RawStream; these are the
-            # ellpack pages xgboost has just written
+            # RawStream handles the input's pages, which are clean; these are
+            # the dirty ellpack pages xgboost has just written
             drop_page_cache(self._cache_dir)
 
         # the build is several minutes of silence otherwise, and it is where
@@ -957,8 +970,10 @@ def main() -> None:
         "--drop-cache-every",
         type=int,
         default=None,
-        help="batches between MADV_DONTNEED on the data file (0 = never; "
-        "default: every 50 if the series file would crowd host RAM, else never)",
+        help="batches between unmapping the series (MADV_DONTNEED; the page "
+        "cache keeps it) and, for xgboost, flushing and evicting its ellpack "
+        "pages (0 = never, and no eviction at startup either; default: every 50 "
+        "if the series file would crowd host RAM, else never)",
     )
     # hashboost
     parser.add_argument("--epochs", type=int, default=5)
@@ -1070,9 +1085,9 @@ def main() -> None:
     )
 
     # a previous run leaves LenDB's 8 GB .npy sitting in the page cache -- 5 GB
-    # of it here -- so every run after the first starts with MemFree near zero
-    # and is the one that gets killed. Start from a clean slate. A file small
-    # enough that we are not evicting during the run is not worth evicting now.
+    # of it here -- so evict it once, and every run starts from the same cold
+    # cache and reads the same way. A file small enough that we are not
+    # unmapping it during the run is not worth evicting now.
     if args.drop_cache_every:
         stream.drop_cache()
 
@@ -1102,7 +1117,8 @@ def main() -> None:
     print(
         f"  reference run trained on {args.n_ref}; "
         + (
-            f"evicting the page cache every {args.drop_cache_every} batches"
+            f"evicted the series from the page cache; unmapping it every "
+            f"{args.drop_cache_every} batches"
             if args.drop_cache_every
             else "leaving the series in the page cache (it fits)"
         ),
