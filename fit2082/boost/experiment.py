@@ -427,6 +427,17 @@ def run_once(
         **config,
     )
 
+    if device.startswith("cuda"):
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+
+    # what is resident before the model exists (it preallocates
+    # its leaf tables, so this must come first) -- mostly the cached features --
+    # so the model's own footprint can be reported apart from the data's
+    resident_mb = (
+        torch.cuda.memory_allocated() / 1e6 if device.startswith("cuda") else 0.0
+    )
+
     torch.manual_seed(seed)
 
     model = (
@@ -444,16 +455,6 @@ def run_once(
         np.arange(start, start + Y.shape[0])
         for start, (_, Y) in zip(starts, split.batches)
     ]
-
-    if device.startswith("cuda"):
-        torch.cuda.synchronize()
-        torch.cuda.reset_peak_memory_stats()
-
-    # what is resident before the model exists -- mostly the cached features --
-    # so the model's own footprint can be reported apart from the data's
-    resident_mb = (
-        torch.cuda.memory_allocated() / 1e6 if device.startswith("cuda") else 0.0
-    )
 
     wall, cpu = time.perf_counter(), time.process_time()
 
