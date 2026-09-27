@@ -2,6 +2,215 @@
 
 ## Benchmarks
 
+### benchmark
+
+This branch compares HashBoost against XGBoost on the five MONSTER datasets
+under a single early-stopping rule, and looks for HashBoost's best
+hyperparameters. The test fold is still unused. It is held back until the
+configuration is frozen. The split is seed 42 on fold 0, with 65,536 training
+rows (32,768 on InsectSound, which has only 40,000 outside fold 0) and 4,096
+validation rows. **Every number is one run.**
+
+    V=b2_h1,b2_h2,...,b12_h8   # bits x rounds per batch
+    uv run python -m fit2082.boost.experiment --dataset Traffic --seeds 1 --compile \
+        --eval-every 5 --out results/benchmark --variants $V
+    uv run python scripts/xgboost_baseline.py --dataset Traffic --out results/benchmark
+    # InsectSound: --num-train 32768 and --n-tr 32768
+
+**Stopping rule.** Both models now choose their stopping point on the tune
+slice, the 4,096 rows after validation, and score validation at that point.
+XGBoost stops per round, with early stopping after 50 rounds without
+improvement on tune (`3836d5c`). Earlier XGBoost figures were the best point
+on validation. HashBoost trains 50 epochs and keeps the evaluation, every
+5 epochs, with the lowest tune error ("tuned" in the sweep files). On most
+cells that evaluation is the last one. The rule rescues the one cell that
+blew up late: LenDB at 10 bits and 4 rounds per batch finished at 0.126,
+and tune stopped it at 0.0544.
+
+#### Bits x rounds per batch
+
+Tune-stopped validation error. The columns are rounds per batch
+(`hashes_per_round`) and the default model is 8 bits x 1. Files are
+`results/benchmark/{dataset}-sweep-{ac2eb0c,a1f7c62}.json`.
+
+| Traffic | 1 | 2 | 4 | 8 |
+| --- | ---: | ---: | ---: | ---: |
+| 2 bits | 0.5342 | 0.5159 | 0.4812 | 0.4558 |
+| 4 bits | 0.4880 | 0.4656 | 0.4309 | 0.4177 |
+| 6 bits | 0.4451 | 0.4292 | 0.4165 | 0.4092 |
+| 8 bits | 0.4324 | 0.4192 | 0.4104 | 0.4004 |
+| 10 bits | 0.4341 | 0.4155 | 0.4106 | **0.3994** |
+| 12 bits | 0.4709 | 0.4717 | 0.4163 | 0.4038 |
+
+| Tiselac | 1 | 2 | 4 | 8 |
+| --- | ---: | ---: | ---: | ---: |
+| 2 bits | 0.1553 | 0.1301 | 0.1030 | 0.0886 |
+| 4 bits | 0.1067 | 0.0830 | 0.0708 | **0.0635** |
+| 6 bits | 0.0818 | 0.0747 | 0.0671 | 0.0674 |
+| 8 bits | 0.0754 | 0.0811 | 0.0698 | 0.0752 |
+| 10 bits | 0.0803 | 0.0774 | 0.0703 | 0.0764 |
+| 12 bits | 0.0896 | 0.0852 | 0.0796 | 0.0701 |
+
+| Pedestrian | 1 | 2 | 4 | 8 |
+| --- | ---: | ---: | ---: | ---: |
+| 2 bits | 0.3359 | 0.2832 | 0.2466 | 0.2236 |
+| 4 bits | 0.2505 | 0.2305 | 0.2146 | 0.2061 |
+| 6 bits | 0.2288 | 0.2153 | 0.2058 | **0.2019** |
+| 8 bits | 0.2192 | 0.2183 | 0.2026 | 0.2036 |
+| 10 bits | 0.2629 | 0.2222 | 0.2104 | 0.2141 |
+| 12 bits | 0.2754 | 0.2480 | -- | -- |
+
+| InsectSound | 1 | 2 | 4 | 8 |
+| --- | ---: | ---: | ---: | ---: |
+| 2 bits | 0.3889 | 0.3286 | 0.2781 | 0.2439 |
+| 4 bits | 0.3027 | 0.2632 | 0.2319 | 0.2207 |
+| 6 bits | 0.2725 | 0.2388 | 0.2307 | **0.2153** |
+| 8 bits | 0.2725 | 0.2539 | 0.2332 | 0.2273 |
+| 10 bits | 0.2747 | 0.2615 | 0.2593 | 0.2510 |
+| 12 bits | 0.2896 | 0.2822 | 0.2751 | 0.2729 |
+
+| LenDB | 1 | 2 | 4 | 8 |
+| --- | ---: | ---: | ---: | ---: |
+| 2 bits | 0.1108 | 0.0874 | 0.0750 | 0.0608 |
+| 4 bits | 0.0754 | 0.0588 | 0.0544 | 0.0515 |
+| 6 bits | 0.0581 | 0.0537 | 0.0525 | 0.0515 |
+| 8 bits | 0.0574 | 0.0540 | 0.0525 | 0.0505 |
+| 10 bits | 0.0576 | 0.0557 | 0.0544 | **0.0486** |
+| 12 bits | 0.0625 | 0.0569 | 0.0530 | 0.0503 |
+
+* **More rounds per batch helps everywhere.** On every dataset, 8 rounds
+  per batch is best or within noise of the best, at whatever width is best
+  for that dataset. The error is still falling from 4 to 8 on Traffic,
+  InsectSound and LenDB.
+* **The best width depends on the dataset.** It is 4 bits on Tiselac, 6 on
+  Pedestrian and InsectSound, and 8-10 on Traffic and LenDB. Rows per class
+  does not predict it: Tiselac (about 7,300 rows per class) wants fewer bits
+  than Traffic (about 9,400), yet LenDB (about 32,800) wants more. Six and
+  eight bits are within about 0.01 of each dataset's best. Two bits, which
+  won on UCR's small training sets, is the worst width on all five.
+* **12 bits is too wide for Pedestrian.** With 82 classes, its tables at 4 and
+  8 rounds per batch need about 13 and 26 GB. WSL spills them into host
+  memory, where they crawl. Those cells were killed and are missing.
+* In the `ac2eb0c` files, `model_peak_mb` omits the leaf tables: the model
+  preallocated them before the resident memory was read (fixed in
+  `a1f7c62`). Their `peak_mb` is right.
+
+#### Freezing the wide cells
+
+At 8 rounds per batch a HashBoost fit costs 10-50x the default, because every
+batch updates every round. This sweep reruns the winning cells with a 10-epoch
+frozen window (`active_epochs`), and at 16 rounds per batch. The default is
+rerun in the same sweep (`results/benchmark/frozen/`).
+
+| dataset | bits x rounds per batch | window | val error | train time |
+| --- | --- | --- | ---: | ---: |
+| Traffic | 8 x 1 (default) | none | 0.4380 | 5s |
+|  | 10 x 8 | none | 0.4045 | 72s |
+|  | 10 x 8 | 10 epochs | 0.4080 | 25s |
+|  | 10 x 16 | 10 epochs | 0.4084 | 98s |
+|  | 8 x 8 | 10 epochs | 0.4106 | 24s |
+|  | 8 x 16 | 10 epochs | 0.4009 | 90s |
+| Tiselac | 8 x 1 (default) | none | 0.0774 | 4s |
+|  | 4 x 8 | none | 0.0669 | 72s |
+|  | 4 x 8 | 10 epochs | 0.0645 | 27s |
+|  | 4 x 16 | 10 epochs | 0.0632 | 105s |
+|  | 6 x 8 | 10 epochs | 0.0657 | 27s |
+|  | 6 x 16 | 10 epochs | 0.0667 | 100s |
+| Pedestrian | 8 x 1 (default) | none | 0.2275 | 8s |
+|  | 6 x 8 | 10 epochs | 0.2007 | 125s |
+|  | 6 x 16 | 10 epochs | 0.1982 | 492s |
+|  | 8 x 8 | 10 epochs | 0.1997 | 120s |
+|  | 8 x 16 | 10 epochs | 0.1995 | 473s |
+| InsectSound | 8 x 1 (default) | none | 0.2671 | 3s |
+|  | 6 x 8 | none | 0.2195 | 18s |
+|  | 6 x 8 | 10 epochs | 0.2217 | 7s |
+|  | 6 x 16 | 10 epochs | 0.2090 | 25s |
+|  | 4 x 16 | 10 epochs | 0.2012 | 27s |
+|  | 8 x 16 | 10 epochs | 0.2388 | 24s |
+| LenDB | 8 x 1 (default) | none | 0.0581 | 8s |
+|  | 8 x 8 | none | 0.0500 | 37s |
+|  | 8 x 8 | 10 epochs | 0.0498 | 17s |
+|  | 8 x 16 | 10 epochs | 0.0520 | 50s |
+|  | 10 x 8 | 10 epochs | 0.0522 | 19s |
+|  | 10 x 16 | 10 epochs | 0.0505 | 54s |
+
+* **Freezing cuts the time 2.2-2.9x at no measurable cost.** At 8 rounds per
+  batch, frozen and unfrozen differ by at most 0.0035, in both directions:
+  Traffic 0.4080 against 0.4045, Tiselac 0.0645 against 0.0669, InsectSound
+  0.2217 against 0.2195, LenDB 0.0498 against 0.0500. For scale, the
+  unfrozen Traffic 10 x 8 read 0.3994 in the grid and 0.4045 here.
+* **16 rounds per batch clearly helps only on InsectSound,** the dataset
+  furthest behind XGBoost. It takes 6 bits from 0.2217 to 0.2090, and 4
+  bits reach 0.2012. Elsewhere it is mixed and within about 0.01: Traffic 8
+  bits gains 0.010 while 10 bits gains nothing. It costs about 4x the time of
+  8 rounds frozen.
+
+#### Against XGBoost
+
+The table below puts XGBoost beside HashBoost's default and its best frozen
+cell. All are tune-stopped validation error, one run each.
+
+- **Time** is training only. HashBoost's QUANT features are computed once and
+  shared by every variant. XGBoost also spends 0.5-9 s building its ellpack
+  (not included), and it evaluates train, validation and tune every round.
+- **Peak GPU** for HashBoost is torch's peak allocation. That includes the
+  cached float32 features, which alone are about 4.4 GB on LenDB. For XGBoost
+  it is the driver's peak minus the idle baseline, which includes its binned
+  ellpack. The two probes differ, so read the memory column as an order of
+  magnitude.
+
+| dataset | model | val error | train time | peak GPU |
+| --- | --- | ---: | ---: | ---: |
+| Traffic | XGBoost (stopped at 427) | 0.4067 | 26s | 151 MB |
+| | HashBoost default, 8 x 1 | 0.4380 | 5s | 179 MB |
+| | HashBoost 10 x 8, frozen | 0.4080 | 25s | 935 MB |
+| | HashBoost 8 x 16, frozen | 0.4009 | 90s | 660 MB |
+| Tiselac | XGBoost (stopped at 508) | 0.0667 | 173s | 778 MB |
+| | HashBoost default, 8 x 1 | 0.0774 | 4s | 754 MB |
+| | HashBoost 4 x 8, frozen | 0.0645 | 27s | 966 MB |
+| | HashBoost 4 x 16, frozen | 0.0632 | 105s | 976 MB |
+| Pedestrian | XGBoost (stopped at 532) | 0.2092 | 271s | 424 MB |
+| | HashBoost default, 8 x 1 | 0.2275 | 8s | 349 MB |
+| | HashBoost 8 x 8, frozen | 0.1997 | 120s | 2,008 MB |
+| | HashBoost 6 x 16, frozen | 0.1982 | 492s | 1,196 MB |
+| InsectSound | XGBoost (stopped at 343) | 0.1907 | 372s | 1,749 MB |
+| | HashBoost default, 8 x 1 | 0.2671 | 3s | 1,026 MB |
+| | HashBoost 6 x 8, frozen | 0.2217 | 7s | 1,156 MB |
+| | HashBoost 4 x 16, frozen | 0.2012 | 27s | 1,301 MB |
+| LenDB | XGBoost (stopped at 197) | 0.0464 | 159s | 5,138 MB |
+| | HashBoost default, 8 x 1 | 0.0581 | 8s | 4,776 MB |
+| | HashBoost 8 x 8, frozen | 0.0498 | 17s | 5,019 MB |
+| | HashBoost 10 x 16, frozen | 0.0505 | 54s | 5,294 MB |
+
+* **The default HashBoost is 5-120x faster than XGBoost and clearly worse,**
+  by 0.011-0.031 on four datasets and 0.076 on InsectSound.
+* **At 8 rounds per batch, frozen, HashBoost is level with XGBoost or ahead
+  on three datasets, and faster on all five.** Pedestrian is 0.0095 ahead in
+  120 s against 271 s. Tiselac is 0.002 ahead in 27 s against 173 s. Traffic
+  is level (0.4080 against 0.4067) in the same 25 s. LenDB is 0.003 behind in
+  17 s against 159 s, about a single rerun's spread.
+* **InsectSound is the exception.** At 8 rounds per batch it is 0.031
+  behind. At 16 it is still 0.011 behind, in 27 s against 372 s, and still
+  improving.
+* **The wide cells use more memory.** HashBoost preallocates leaf tables for
+  every round it will train, so Pedestrian at 8 bits x 8 holds 2.0 GB
+  against XGBoost's 0.4 GB. At 6 bits it needs 0.8 GB for nearly the same
+  error.
+* **The HashBoost cells were picked on validation,** which flatters HashBoost,
+  while XGBoost ran at fixed default settings. A fair final comparison fixes
+  one HashBoost configuration first.
+
+#### What is left
+
+* **Choose one configuration.** The cross-dataset candidate is 6 bits x 8
+  rounds per batch with a 10-epoch window. Its mean tune-stopped error over
+  the five grids is 0.189, against 0.191 for 8 bits x 8 and 0.192 for 4 x 8.
+  One run per cell cannot separate those. Several seeds of the two or three
+  candidates would.
+* **InsectSound wants more capacity:** 16 or 32 rounds per batch, or more
+  epochs.
+* Then the test fold, once, for the chosen configuration and XGBoost.
+
 ### faster-streams
 
 In a whole-pool stream the model is the small part. At `157e54d`, QUANT took
