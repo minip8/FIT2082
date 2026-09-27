@@ -361,10 +361,11 @@ VARIANTS: dict[str, dict[str, Any]] = {
 # batch took LenDB from 0.075 to 0.046. `b8_h1` is `baseline` under the grid's
 # name. The frozen copies bound the cost of the wide cells, whose unfrozen cost
 # grows with H**2 (H rounds a batch, each batch counted H times into all of them).
+# Traffic still improved from 4 to 8 bits, hence 10 and 12.
 VARIANTS.update(
     {
         f"b{bits}_h{per_batch}": {"num_bits": bits, "hashes_per_round": per_batch}
-        for bits in (2, 4, 6, 8)
+        for bits in (2, 4, 6, 8, 10, 12)
         for per_batch in (1, 2, 4, 8)
     }
 )
@@ -375,7 +376,7 @@ VARIANTS.update(
             "hashes_per_round": per_batch,
             "active_epochs": 10,
         }
-        for bits in (2, 4, 6, 8)
+        for bits in (2, 4, 6, 8, 10, 12)
         for per_batch in (1, 2, 4, 8, 16)
     }
 )
