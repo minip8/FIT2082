@@ -355,6 +355,31 @@ VARIANTS: dict[str, dict[str, Any]] = {
     "frozen_10ep_capacity_2": {"active_epochs": 10, "hashes_per_round": 2},
 }
 
+# -- benchmark grid ------------------------------------------------------------
+# Bits x rounds per batch, the two knobs that moved error most: on UCR fewer
+# bits won below ~1,000 training rows, and on the whole-pool streams 8 rounds a
+# batch took LenDB from 0.075 to 0.046. `b8_h1` is `baseline` under the grid's
+# name. The frozen copies bound the cost of the wide cells, whose unfrozen cost
+# grows with H**2 (H rounds a batch, each batch counted H times into all of them).
+VARIANTS.update(
+    {
+        f"b{bits}_h{per_batch}": {"num_bits": bits, "hashes_per_round": per_batch}
+        for bits in (2, 4, 6, 8)
+        for per_batch in (1, 2, 4, 8)
+    }
+)
+VARIANTS.update(
+    {
+        f"b{bits}_h{per_batch}_frozen_10ep": {
+            "num_bits": bits,
+            "hashes_per_round": per_batch,
+            "active_epochs": 10,
+        }
+        for bits in (2, 4, 6, 8)
+        for per_batch in (1, 2, 4, 8, 16)
+    }
+)
+
 
 # == running ===================================================================
 
@@ -423,10 +448,17 @@ def run_once(
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
 
+    # what is resident before the model exists -- mostly the cached features --
+    # so the model's own footprint can be reported apart from the data's
+    resident_mb = (
+        torch.cuda.memory_allocated() / 1e6 if device.startswith("cuda") else 0.0
+    )
+
     wall, cpu = time.perf_counter(), time.process_time()
 
     curve_x: list[int] = []
     curve_y: list[float] = []
+    curve_tune: list[float] = []
 
     for epoch in range(epochs):
         for (X, Y), batch_rows in zip(split.batches, rows):
@@ -435,6 +467,16 @@ def run_once(
         if (epoch + 1) % eval_every == 0 or epoch == epochs - 1:
             curve_x.append(model.num_rounds)
             curve_y.append(evaluate(model, split.X_va, split.Y_va))
+            if split.X_tune is not None:
+                curve_tune.append(evaluate(model, split.X_tune, split.Y_tune))
+
+    # Early stopping on the tune slice, the rule the tree baselines follow: the
+    # eval point with the lowest tune error (the earliest, on a tie) is the
+    # model that would have been kept, and it is scored on X_va. The curve is
+    # only as fine as `eval_every`, so this is coarser than XGBoost's per-round
+    # stop -- which can only flatter the trees, not HashBoost.
+    stop = int(np.argmin(curve_tune)) if curve_tune else len(curve_y) - 1
+    tuned, tuned_rounds = curve_y[stop], curve_x[stop]
 
     boosted_final = curve_y[-1]
     readout_info = None
@@ -473,6 +515,8 @@ def run_once(
         "seed": seed,
         "final": curve_y[-1],
         "best": min(curve_y),
+        "tuned": tuned,
+        "tuned_rounds": tuned_rounds,
         "boosted_final": boosted_final,
         "agreement": agreement,
         "readout": readout_info,
@@ -484,7 +528,8 @@ def run_once(
             if device.startswith("cuda")
             else 0.0
         ),
-        "curve": {"x": curve_x, "y": curve_y},
+        "resident_mb": resident_mb,
+        "curve": {"x": curve_x, "y": curve_y, "tune": curve_tune},
     }
 
     del model
@@ -522,11 +567,14 @@ def run_variant(
             "mean": statistics.mean(finals),
             "sd": statistics.stdev(finals) if len(finals) > 1 else 0.0,
             "best": min(finals),
+            "tuned": statistics.mean(r["tuned"] for r in runs),
+            "tuned_rounds": statistics.mean(r["tuned_rounds"] for r in runs),
             "boosted_mean": statistics.mean(r["boosted_final"] for r in runs),
             "agreement": statistics.mean(agreements) if agreements else None,
             "rounds": runs[0]["rounds"],
             "wall_s": statistics.mean(r["wall_s"] for r in runs),
             "peak_mb": max(r["peak_mb"] for r in runs),
+            "model_peak_mb": max(r["peak_mb"] - r["resident_mb"] for r in runs),
         },
     }
 
@@ -607,8 +655,8 @@ def main() -> None:
         f"{args.seeds} seeds x {args.epochs} epochs\n"
     )
     print(
-        f"{'variant':30s} {'val err (mean+-sd)':>22s} {'agree':>7s} "
-        f"{'rounds':>7s} {'wall':>8s} {'peak':>8s}"
+        f"{'variant':30s} {'val err (mean+-sd)':>22s} {'tuned':>7s} {'agree':>7s} "
+        f"{'rounds':>7s} {'wall':>8s} {'peak':>8s} {'model':>8s}"
     )
 
     # QUANT keeps the original name, which the notebooks glob for; any other
@@ -664,8 +712,9 @@ def main() -> None:
         s = entry["summary"]
         agreement = f"{s['agreement']:7.3f}" if s["agreement"] is not None else " " * 7
         print(
-            f"{name:30s} {s['mean']:12.4f} +- {s['sd']:.4f} {agreement} "
-            f"{s['rounds']:7d} {s['wall_s']:7.1f}s {s['peak_mb']:7.0f}M",
+            f"{name:30s} {s['mean']:12.4f} +- {s['sd']:.4f} {s['tuned']:7.4f} "
+            f"{agreement} {s['rounds']:7d} {s['wall_s']:7.1f}s "
+            f"{s['peak_mb']:7.0f}M {s['model_peak_mb']:7.0f}M",
             flush=True,
         )
 

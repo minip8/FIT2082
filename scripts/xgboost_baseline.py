@@ -16,6 +16,11 @@ The split is reproduced exactly as the notebook draws it -- same fold, same
 `np.random.seed(42)` shuffle -- so the curves are comparable to the hashboost
 run already in `results/`.
 
+Early stopping watches the tune slice -- the `n_te` rows after validation, the
+same rows `experiment.py` holds out as `X_tune` -- and the reported error is
+validation error at the round it stops on, so nothing is chosen on `X_va`.
+Runs before the `benchmark` branch stopped on validation itself.
+
     uv run python scripts/xgboost_baseline.py --dataset LenDB
 
 `--stdin` takes the same arguments on a pipe instead, written as flags or as a
@@ -54,7 +59,7 @@ from fit2082.results import (
 
 def load_raw(
     path: str, dataset: str, n_tr: int, n_va: int, n_te: int, batch_size: int, seed: int
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
+) -> tuple[np.ndarray, ...]:
     """Draw the notebook's split and return the *raw* series, not features.
 
     Raw LenDB rows are 3 x 540 float32, so the training subset is 425 MB -- it
@@ -83,10 +88,19 @@ def load_raw(
 
     X_tr, Y_tr = collect(ix[:n_tr])
     X_va, Y_va = collect(ix[n_tr : n_tr + n_va])
+    X_te, Y_te = collect(ix[n_tr + n_va : n_tr + n_va + n_te])
 
     data.close()
 
-    return X_tr, Y_tr.astype(np.int32), X_va, Y_va.astype(np.int32), num_classes
+    return (
+        X_tr,
+        Y_tr.astype(np.int32),
+        X_va,
+        Y_va.astype(np.int32),
+        X_te,
+        Y_te.astype(np.int32),
+        num_classes,
+    )
 
 
 class QuantBatches(xgb.DataIter):
@@ -181,6 +195,7 @@ def main() -> None:
     parser.add_argument("--num-boost-round", type=int, default=1000)
     parser.add_argument("--early-stopping-rounds", type=int, default=50)
     parser.add_argument("--merge-from", default=None)
+    parser.add_argument("--name", default="xgboost", help="model key in the file")
     parser.add_argument(
         "--device", default="cuda" if torch.cuda.is_available() else "cpu"
     )
@@ -192,7 +207,7 @@ def main() -> None:
 
     load_wall = time.perf_counter()
 
-    X_tr_raw, Y_tr, X_va_raw, Y_va, num_classes = load_raw(
+    X_tr_raw, Y_tr, X_va_raw, Y_va, X_te_raw, Y_te, num_classes = load_raw(
         args.path,
         args.dataset,
         args.n_tr,
@@ -252,6 +267,8 @@ def main() -> None:
     # ref=dtrain reuses the training cuts, so validation does not sketch its own
     valid_iter = QuantBatches(X_va_raw, Y_va, quant, args.iter_batch_size, device)
     dvalid = xgb.QuantileDMatrix(valid_iter, max_bin=args.max_bin, ref=dtrain)
+    tune_iter = QuantBatches(X_te_raw, Y_te, quant, args.iter_batch_size, device)
+    dtune = xgb.QuantileDMatrix(tune_iter, max_bin=args.max_bin, ref=dtrain)
 
     # the notebook's `timings[name]` is a list of *reruns* of one cell; here the
     # two entries are the two phases of a single run, so they are labelled
@@ -273,7 +290,7 @@ def main() -> None:
     # hand back the scratch torch cached while transforming batches: xgboost
     # allocates through its own CUDA allocator and cannot see, let alone reuse,
     # blocks torch is holding -- the "Free memory: 0B" failure mode
-    del train_iter, valid_iter
+    del train_iter, valid_iter, tune_iter
     gc.collect()
     if device.startswith("cuda"):
         torch.cuda.empty_cache()
@@ -301,7 +318,8 @@ def main() -> None:
         dtrain,
         num_boost_round=args.num_boost_round,
         early_stopping_rounds=args.early_stopping_rounds,
-        evals=[(dtrain, "tr"), (dvalid, "va")],
+        # early stopping watches the last entry, so the tune slice goes last
+        evals=[(dtrain, "tr"), (dvalid, "va"), (dtune, "tune")],
         evals_result=evals_result,
         callbacks=[probe],
         verbose_eval=False,
@@ -318,11 +336,13 @@ def main() -> None:
 
     tr = evals_result["tr"]["merror"]
     va = evals_result["va"]["merror"]
+    tune = evals_result["tune"]["merror"]
+    tuned = va[booster.best_iteration]
 
     print(
         f"  trained {len(va)} rounds in {train_time['wall_s']:.1f}s  "
         f"tr={tr[-1]:.4f} va={va[-1]:.4f} best_va={min(va):.4f} "
-        f"(iter {booster.best_iteration})",
+        f"tuned_va={tuned:.4f} (iter {booster.best_iteration})",
         flush=True,
     )
     print(
@@ -334,7 +354,7 @@ def main() -> None:
     )
 
     entry = {
-        "xgboost": {
+        args.name: {
             "x_name": "round",
             "params": xgb_params,
             "timings": [build_time, train_time],
@@ -355,7 +375,13 @@ def main() -> None:
                 "build_passes": passes,
             },
             "best_iteration": int(booster.best_iteration),
-            "results": {"tr": {"merror": curve(tr)}, "va": {"merror": curve(va)}},
+            "early_stopping": "tune",
+            "tuned": tuned,
+            "results": {
+                "tr": {"merror": curve(tr)},
+                "va": {"merror": curve(va)},
+                "tune": {"merror": curve(tune)},
+            },
         }
     }
 
