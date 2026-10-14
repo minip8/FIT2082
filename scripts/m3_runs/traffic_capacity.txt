@@ -1,0 +1,11 @@
+# Traffic whole-pool HashBoost: control against 8 and 16 rounds per batch, one
+# L40S between them (README "More rounds per pass" ran the first two on the
+# laptop; Traffic is bound by the model, so 16 rounds cost far more than on
+# LenDB). Accuracy only: the runs share the GPU, so their timings don't count.
+#
+#     sbatch -c 12 --mem=32G --time=02:00:00 -J traffic-capacity scripts/m3_job.sh \
+#         --stage Traffic --parallel scripts/m3_runs/traffic_capacity.txt
+
+python scripts/stream_full.py --path "$DATA" --dataset Traffic --model hashboost --epochs 10 --compile --label control --out results/traffic-capacity/control
+python scripts/stream_full.py --path "$DATA" --dataset Traffic --model hashboost --epochs 10 --compile --hashes-per-round 8 --active-epochs 2 --label h8_w2 --out results/traffic-capacity/h8_w2
+python scripts/stream_full.py --path "$DATA" --dataset Traffic --model hashboost --epochs 10 --compile --hashes-per-round 16 --active-epochs 2 --label h16_w2 --out results/traffic-capacity/h16_w2
