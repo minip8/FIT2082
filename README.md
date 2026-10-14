@@ -481,6 +481,97 @@ build:
   MosquitoSound, Traffic and the S2Agri subsets, where the short budget stops
   it early.
 
+**Speed round** (`81cfbc2`, jobs 61019988-61019991, same setup;
+`scripts/m3_runs/speed.py`). Three more configurations on all 25 datasets
+separate what `F` saves from what it loses: `G_short` is `G` on `F`'s
+2,000-batch, 250-patience budget; `G_h4` is `G` at 4 rounds per batch; and
+`L_short` is leaf L2 1 at 8 rounds per batch on the short budget. The table
+repeats `G`, `F` and `L` from above. One run each:
+
+| dataset | `G` | `G_short` | `G_h4` | `F` | `L` | `L_short` | XGBoost |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| AudioMNIST-DS | 0.0159 (75s) | 0.0168 (33s) | **0.0156** (63s) | 0.0171 (31s) | 0.0356 (56s) | 0.0352 (22s) | 0.0293 (378s) |
+| CornellWhaleChallenge | 0.1355 (44s) | 0.1365 (22s) | 0.1338 (35s) | 0.1338 (27s) | 0.1357 (58s) | 0.1401 (12s) | **0.1316** (49s) |
+| CrowdSourced | 0.0058 (32s) | 0.0058 (14s) | **0.0053** (19s) | 0.0069 (14s) | 0.0338 (61s) | 0.0386 (11s) | 0.0079 (51s) |
+| DREAMERA | 0.1492 (96s) | 0.1619 (39s) | 0.1445 (71s) | 0.1448 (54s) | 0.1230 (99s) | 0.1318 (23s) | **0.0818** (324s) |
+| DREAMERV | 0.1392 (124s) | 0.1604 (36s) | 0.1545 (64s) | 0.1467 (54s) | 0.1230 (99s) | 0.1328 (23s) | **0.0811** (404s) |
+| FordChallenge | 0.0559 (81s) | 0.0552 (25s) | 0.0571 (35s) | 0.0635 (39s) | 0.1028 (56s) | 0.1045 (13s) | **0.0459** (23s) |
+| FruitFlies | 0.0464 (57s) | **0.0444** (33s) | 0.0449 (36s) | 0.0479 (29s) | 0.0586 (46s) | 0.0571 (15s) | 0.0496 (209s) |
+| InsectSound | **0.1770** (76s) | 0.1919 (14s) | 0.1831 (40s) | 0.1929 (15s) | 0.2163 (44s) | 0.2109 (15s) | 0.1833 (131s) |
+| LakeIce | **0.0007** (32s) | **0.0007** (17s) | 0.0010 (22s) | 0.0015 (17s) | 0.0015 (36s) | 0.0017 (9s) | 0.0024 (6s) |
+| LenDB | 0.0466 (122s) | 0.0454 (77s) | 0.0452 (208s) | **0.0422** (68s) | 0.0432 (128s) | 0.0461 (49s) | 0.0471 (208s) |
+| MosquitoSound | **0.0994** (473s) | 0.1086 (138s) | 0.1069 (296s) | 0.1160 (82s) | 0.1145 (360s) | 0.1221 (148s) | 0.1018 (1632s) |
+| Opportunity | 0.0710 (62s) | 0.0739 (18s) | **0.0702** (64s) | 0.0768 (21s) | 0.1092 (102s) | 0.1067 (29s) | out of memory |
+| PAMAP2 | 0.0049 (45s) | 0.0046 (25s) | **0.0042** (28s) | 0.0059 (21s) | 0.0408 (144s) | 0.0427 (22s) | 0.0083 (436s) |
+| Pedestrian | 0.2041 (327s) | 0.2080 (124s) | 0.2080 (117s) | 0.2075 (108s) | **0.1733** (654s) | 0.1758 (63s) | 0.1924 (66s) |
+| S2Agri-10pc-17 | 0.0486 (189s) | 0.0823 (71s) | 0.0701 (100s) | 0.0833 (71s) | **0.0259** (294s) | 0.0415 (44s) | 0.1770 (2811s) cap |
+| S2Agri-10pc-34 | 0.0425 (221s) | 0.0793 (82s) | 0.0664 (112s) | 0.0806 (80s) | **0.0200** (399s) | 0.0400 (53s) | 0.1836 (4870s) cap |
+| STEW | 0.0317 (97s) | 0.0325 (16s) | 0.0305 (53s) | 0.0376 (33s) | 0.0859 (89s) | 0.0874 (10s) | **0.0242** (134s) |
+| Skoda | 0.0571 (61s) | **0.0562** (31s) | 0.0580 (67s) | 0.0611 (25s) | 0.1209 (159s) | 0.1337 (18s) | 0.0620 (182s) |
+| TimeSen2Crop | 0.0288 (570s) | 0.0330 (163s) | 0.0332 (319s) | 0.0339 (141s) | 0.0410 (383s) | 0.0486 (145s) | **0.0232** (7188s) |
+| Tiselac | **0.0537** (122s) | 0.0557 (31s) | 0.0586 (41s) | 0.0569 (22s) | 0.0613 (63s) | 0.0613 (21s) | 0.0649 (55s) |
+| Traffic | 0.3196 (125s) | 0.3391 (53s) | 0.3342 (64s) | 0.3364 (50s) | **0.2788** (169s) | 0.3103 (25s) | 0.3330 (57s) |
+| UCIActivity | **0.0082** (40s) | **0.0082** (13s) | 0.0114 (20s) | 0.0120 (18s) | 0.0405 (39s) | 0.0399 (12s) | 0.0203 (22s) |
+| USCActivity | 0.0762 (70s) | 0.0801 (42s) | 0.0793 (51s) | 0.0808 (21s) | 0.0884 (109s) | 0.0962 (20s) | **0.0723** (104s) |
+| WISDM | 0.0092 (32s) | 0.0100 (15s) | **0.0088** (21s) | 0.0129 (13s) | 0.0338 (25s) | 0.0342 (10s) | 0.0134 (10s) |
+| WISDM2 | 0.0205 (69s) | 0.0244 (35s) | 0.0208 (60s) | 0.0254 (31s) | 0.0237 (127s) | 0.0283 (11s) | **0.0146** (50s) |
+| WhaleSounds | 0.3142 (126s) | 0.3235 (19s) | 0.3181 (45s) | 0.3125 (35s) | 0.3091 (108s) | 0.3162 (22s) | **0.2947** (298s) |
+
+Every configuration and tune-chosen pair, scored on the 23 datasets with a fair
+XGBoost number. "Geo ratio" is the geometric mean of HashBoost's error over
+XGBoost's (below 1 is better than XGBoost), and time is total training over
+those 23 (XGBoost: 12,018 s). The 10 datasets the two screens used are
+split from the 13 they never touched, since the configurations were chosen
+on the first:
+
+| configuration | geo ratio | ahead / level / behind | time | geo ratio, screened 10 | geo ratio, other 13 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `auto(G,L)` | **0.888** | 6 / 12 / 5 | 6,008s | 0.857 | **0.913** |
+| `G` | 0.916 | 5 / 12 / 6 | 2,896s | 0.893 | 0.935 |
+| `auto(G_short,L_short)` | 0.928 | 5 / 8 / 10 | 1,732s | 0.890 | 0.958 |
+| `G_h4` | 0.947 | 3 / 11 / 9 | 1,774s | | |
+| `G_short` | 0.954 | 3 / 8 / 12 | 1,013s | 0.915 | 0.985 |
+| `F` | 1.041 | 3 / 9 / 11 | 948s | 1.025 | 1.054 |
+| `L` | 1.497 | 2 / 4 / 17 | 3,112s | 2.024 | 1.187 |
+| `L_short` | 1.582 | 2 / 4 / 17 | 719s | | |
+| benchmark `fast` | 1.609 | 2 / 4 / 17 | 3,889s | 2.183 | 1.273 |
+
+* **Candidates are now cheap; the budget is what costs.** `G_short` and `F`
+  take the same time (1,013 s and 948 s), but 64 candidates instead of 16 take
+  the geo ratio from 1.041 to 0.954. The full budget then buys `G` another
+  0.038 for 2.9x the time. Sixteen datasets are within 0.003 either way;
+  the short budget costs 0.009-0.037 on MosquitoSound, WhaleSounds, DREAMERA,
+  InsectSound, Traffic, DREAMERV and the S2Agri subsets, mostly large pools
+  but not only. `F` is dominated and can go.
+* **Halving the rounds per batch is a worse saving than shortening the
+  budget.** `G_h4` costs 1.7x `G_short`'s time and is level with it.
+* **The held-out 13 confirm the ranking.** Every configuration scores a
+  little worse there than on the screened 10, as selection predicts, but the
+  order is the same and `auto(G,L)` (0.913) and `G` (0.935) still beat
+  XGBoost there.
+
+**What each goal needs** (from these one-run-per-cell results; the next step
+is the test fold and more seeds for the chosen configurations):
+
+* **Accuracy: `auto(G,L)`.** Run `G` and `L` and keep the one with the lower
+  tune error, which matched validation on all 26 datasets. Its error is 0.89x
+  XGBoost's geometrically, and 0.91x on the datasets no screen saw, in half
+  XGBoost's time. The ingredients, in order of effect: gain-scored splits
+  (64 candidates) with heavy leaf L2 (100) and 6-bit tables where gain helps;
+  leaf L2 1 and 16 rounds per batch where it does not (the largest pools and
+  the EEG sets); the full budget of up to 5,000 batches.
+* **Speed: `G_short`.** One configuration, 1,013 s for 23 datasets against
+  XGBoost's 12,018 s (12x faster), and still 0.95x its error. The ingredients:
+  the feature cache (2-7x on small pools at no cost), the matmul gain scoring
+  (2-4.5x on the splitter), and the 2,000-batch, 250-patience budget. Fewer
+  candidates or fewer rounds per batch save less than the budget does.
+* **Balance: `G` alone, or `auto(G_short,L_short)`.** `G` is a single
+  configuration at 0.92x XGBoost's error in a quarter of its time (2,896 s);
+  `auto(G_short,L_short)` reaches 0.93x in a seventh (1,732 s) by adding the
+  cheap `L_short` for the large pools that gain overfits.
+* **Not solved by any lever:** DREAMERA and DREAMERV stay about 0.04 behind
+  XGBoost (1.5x its error), WhaleSounds 0.014 behind.
+
 ### benchmark
 
 This branch compares HashBoost against XGBoost on the five MONSTER datasets

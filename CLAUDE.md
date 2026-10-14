@@ -73,7 +73,9 @@ can round a leaf differently in its last 2 ulps, well below run-to-run noise. Sc
 - `partition.py`: `Partitioner` owns the predicate family, its parameter
   storage and its encoder (axis-aligned or oblique).
 - `splits.py`: a `Splitter` chooses the members of that family
-  (`HardPairSplitter`, with `sample=True` for Gumbel-sampled pairs). On CUDA
+  (`HardPairSplitter`, with `sample=True` for Gumbel-sampled pairs;
+  `GainSplitter`, the best of several hard-pair splits per bit by gain, which
+  the README's `m3` section found the biggest accuracy lever). On CUDA
   the greedy pairing runs as a one-thread Triton kernel (`pair_on_device`), so
   a round needs no host sync. It must stay pair-for-pair equal to `_pair`,
   and a test checks this.
