@@ -87,20 +87,57 @@ mean of its last seven evaluations. One run each:
 | Traffic | 1,160,582 | 974 (923) | 49s | 0.4067 | 0.3330 | **0.2931** (16 rounds per batch) |
 
 * **More data helps XGBoost most on Traffic,** 0.4067 to 0.3330 with 18x the
-  rows, and it was still improving: it stopped at round 974 of the 1,000
-  cap, with training error 0.299, so the cap is binding. A rerun with a higher
-  `--num-boost-round` is needed before Traffic's gap means anything.
+  rows. Round 974 is early stopping (best 923, plus 50 patience), not the
+  1,000-round cap: a rerun capped at 5,000 stopped at the same round with the
+  same error (job 61008451).
 * **LenDB gains nothing from 15x the rows** (0.0464 to 0.0471). Whole-pool
   HashBoost at 16 rounds per batch is 0.002 ahead of it, about one control sd.
 * **InsectSound trained on exactly the benchmark's 32,768 rows,** because its
   pool has nothing beyond the reference run, yet it moved from 0.1907 to 0.1833.
-  The settings are the same as `xgboost_baseline.py`'s. What differs is the
-  pipeline: streamed batches in shuffled order, a sketch built over those
-  batches, and its own QUANT pass. That gap is unexplained and bounds how much
-  any whole-pool difference on these datasets can be trusted.
-* **Timings are clean** (`context.shared_gpu` false), but HashBoost's
-  whole-pool times above are from shared runs, so there is no fair speed
-  comparison yet.
+  Explained below: it is the batches XGBoost builds its quantile sketch from.
+* The HashBoost column is from shared runs. The isolated reruns below replace
+  it.
+
+**XGBoost depends on how its sketch is batched** (`a27ac7b`/`2951919`, jobs
+61008452 and 61009766, InsectSound's 32,768 benchmark rows, same settings,
+tune-stopped):
+
+| pipeline | as run | runs | one batch of 32,768 |
+| --- | ---: | ---: | ---: |
+| `xgboost_baseline.py` (4,096-row batches) | 0.1907 (iter 342) | 2, identical | 0.1846 (iter 497) |
+| `stream_full.py`, in memory | 0.1833 (iter 497) | 2, identical | 0.1836 (iter 475) |
+| `stream_full.py`, external memory | 0.1833 (iter 497) | 2, identical | |
+
+* **Each pipeline is deterministic,** and in memory against external memory
+  changes nothing.
+* **Batching moves the result by up to 0.006 on its own.** The benchmark's
+  script went from 0.1907 to 0.1846 with only `--iter-batch-size` changed.
+  With one batch each, the two pipelines are 0.0010 apart. The quantile cuts
+  differ with the batches they are sketched from, and early stopping on 3,136
+  tune rows amplifies a slightly different model into a different stopping
+  round.
+* **So XGBoost has a noise floor too,** although a rerun cannot show it. On
+  InsectSound, a gap under about 0.006 between two XGBoost pipelines, or
+  between HashBoost and one XGBoost number, is not a result. That holds for
+  the benchmark's "Against XGBoost" table as much as for this section.
+
+**Whole-pool HashBoost alone** (`a27ac7b`, job 61008453, one L40S, in series,
+twice each, 16 rounds per batch with a 2-epoch window;
+`scripts/m3_runs/hashboost_timing.txt`). XGBoost's time adds its ellpack build,
+since that is where its QUANT pass runs:
+
+| whole pool | HashBoost train | HashBoost val error | XGBoost build + train | XGBoost val error |
+| --- | ---: | ---: | ---: | ---: |
+| LenDB | 94s, 86s | **0.0433, 0.0428** | 46 + 159 = 205s | 0.0471 |
+| Traffic | 322s, 323s | **0.2864, 0.2864** | 2 + 49 = **51s** | 0.3330 |
+
+* **On LenDB HashBoost is about 2x faster and 0.004 ahead,** about two control
+  sd.
+* **On Traffic HashBoost is 0.047 ahead but about 6x slower.** Traffic is bound
+  by the model, and 16 rounds per batch costs 309 s of `fit_batch`. 8 rounds per
+  batch cost half as much and still led XGBoost by 0.03 in the shared batch.
+* Isolated, the LenDB arm trains in about half its shared time (177 s). Timings
+  of the two reruns agree within 10%.
 
 ### benchmark
 
