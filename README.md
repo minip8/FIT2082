@@ -405,6 +405,82 @@ Traffic 0.2957 to 0.3040, LenDB 0.0474 to 0.0554. So a single gap under about
   arm reaches zero training error, and gain makes it worse. Something about
   that task, not the levers screened here, decides it.
 
+**Three configurations over all of MONSTER** (`b204a42`/`aa22a49`, jobs
+61019551-61019554, four L40S, each alone and in series;
+`scripts/m3_runs/configs.py`). Fixed from the two screens before the other 15
+datasets ran, on the benchmark's 25 datasets and splits:
+
+* `G` (gain): GainSplitter with 64 candidates, leaf L2 100, 6 bits; 8 rounds
+  per batch, 128-batch window, the benchmark's budget.
+* `L` (large): leaf L2 1, 16 rounds per batch, 128-batch window, the same
+  budget.
+* `F` (fast): 16 candidates, leaf L2 100, 6 bits, at most 2,000 batches and
+  250 batches of patience.
+* `auto`: per dataset, whichever of `G` and `L` has the lower tune error.
+  It needs no run of its own, but costs both.
+
+All use the feature cache. Only TimeSen2Crop's `G` ran the first, scatter
+version of the gain scoring; the rest ran the matmul (`aa22a49`), which picks
+the same splits faster. Val error at the tune-chosen point, one run each.
+"Benchmark best" is the best of the benchmark's four configurations, chosen on
+validation. Times are training including QUANT, and XGBoost's include its
+build:
+
+| dataset | train rows | `G` | `L` | `F` | `auto` | benchmark best | XGBoost |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| AudioMNIST-DS | 15,808 | **0.0159** (75s) | 0.0356 (56s) | 0.0171 (31s) | 0.0159 (G) | 0.0361 | 0.0293 (378s) |
+| CornellWhaleChallenge | 15,808 | 0.1355 (44s) | 0.1357 (58s) | 0.1338 (27s) | 0.1355 (G) | 0.1353 | **0.1316** (49s) |
+| CrowdSourced | 5,674 | **0.0058** (32s) | 0.0338 (61s) | 0.0069 (14s) | 0.0058 (G) | 0.0370 | 0.0079 (51s) |
+| DREAMERA | 132,446 | 0.1492 (96s) | 0.1230 (99s) | 0.1448 (54s) | 0.1230 (L) | 0.1296 | **0.0818** (324s) |
+| DREAMERV | 132,446 | 0.1392 (124s) | 0.1230 (99s) | 0.1467 (54s) | 0.1230 (L) | 0.1416 | **0.0811** (404s) |
+| FordChallenge | 20,811 | 0.0559 (81s) | 0.1028 (56s) | 0.0635 (39s) | 0.0559 (G) | 0.1042 | **0.0459** (23s) |
+| FruitFlies | 19,422 | **0.0464** (57s) | 0.0586 (46s) | 0.0479 (29s) | 0.0464 (G) | 0.0576 | 0.0496 (209s) |
+| InsectSound | 32,768 | **0.1770** (76s) | 0.2163 (44s) | 0.1929 (15s) | 0.1770 (G) | 0.2227 | 0.1833 (131s) |
+| LakeIce | 95,232 | **0.0007** (32s) | 0.0015 (36s) | 0.0015 (17s) | 0.0007 (G) | 0.0017 | 0.0024 (6s) |
+| LenDB | 975,291 | 0.0466 (122s) | 0.0432 (128s) | **0.0422** (68s) | 0.0432 (L) | 0.0437 | 0.0471 (208s) |
+| MosquitoSound | 215,460 | **0.0994** (473s) | 0.1145 (360s) | 0.1160 (82s) | 0.0994 (G) | 0.1189 | 0.1018 (1632s) |
+| Opportunity | 7,312 | **0.0710** (62s) | 0.1092 (102s) | 0.0768 (21s) | 0.0710 (G) | 0.1104 | out of memory |
+| PAMAP2 | 20,769 | **0.0049** (45s) | 0.0408 (144s) | 0.0059 (21s) | 0.0049 (G) | 0.0435 | 0.0083 (436s) |
+| Pedestrian | 143,504 | 0.2041 (327s) | **0.1733** (654s) | 0.2075 (108s) | 0.1733 (L) | 0.1780 | 0.1924 (66s) |
+| S2Agri-10pc-17 | 4,653,666 | 0.0486 (189s) | 0.0259 (294s) | 0.0833 (71s) | 0.0259 (L) | **0.0203** | 0.1770 (2811s) cap |
+| S2Agri-10pc-34 | 4,653,666 | 0.0425 (221s) | **0.0200** (399s) | 0.0806 (80s) | 0.0200 (L) | **0.0200** | 0.1836 (4870s) cap |
+| STEW | 13,192 | 0.0317 (97s) | 0.0859 (89s) | 0.0376 (33s) | 0.0317 (G) | 0.0862 | **0.0242** (134s) |
+| Skoda | 6,774 | **0.0571** (61s) | 0.1209 (159s) | 0.0611 (25s) | 0.0571 (G) | 0.1231 | 0.0620 (182s) |
+| TimeSen2Crop | 831,779 | 0.0288 (570s) | 0.0410 (383s) | 0.0339 (141s) | 0.0288 (G) | 0.0425 | **0.0232** (7188s) |
+| Tiselac | 71,715 | **0.0537** (122s) | 0.0613 (63s) | 0.0569 (22s) | 0.0537 (G) | 0.0662 | 0.0649 (55s) |
+| Traffic | 1,160,582 | 0.3196 (125s) | 0.2788 (169s) | 0.3364 (50s) | 0.2788 (L) | **0.2761** | 0.3330 (57s) |
+| UCIActivity | 4,740 | **0.0082** (40s) | 0.0405 (39s) | 0.0120 (18s) | 0.0082 (G) | 0.0450 | 0.0203 (22s) |
+| USCActivity | 34,868 | 0.0762 (70s) | 0.0884 (109s) | 0.0808 (21s) | 0.0762 (G) | 0.0952 | **0.0723** (104s) |
+| WISDM | 7,195 | **0.0092** (32s) | 0.0338 (25s) | 0.0129 (13s) | 0.0092 (G) | 0.0342 | 0.0134 (10s) |
+| WISDM2 | 89,902 | 0.0205 (69s) | 0.0237 (127s) | 0.0254 (31s) | 0.0205 (G) | 0.0261 | **0.0146** (50s) |
+| WhaleSounds | 75,938 | 0.3142 (126s) | 0.3091 (108s) | 0.3125 (35s) | 0.3091 (L) | 0.3091 | **0.2947** (298s) |
+
+* **`auto` is the strongest HashBoost yet, and level with or ahead of XGBoost
+  overall.** Against XGBoost on the 23 datasets with a fair XGBoost number (no
+  S2Agri, whose XGBoost hit its cap, and no Opportunity), `auto` is more than
+  0.006 ahead on 6, level on 12 and behind on 5; the benchmark's best was ahead
+  on 2 and behind on 17. The geometric mean of HashBoost's error over
+  XGBoost's is **0.89** for `auto`, 0.92 for `G`, 1.04 for `F`, 1.50 for
+  `L`, and 1.57 for the benchmark's best -- itself chosen on validation.
+* **The tune slice chose right every time.** On all 26 datasets the
+  configuration with the lower tune error also had the lower validation
+  error. It picked `G` on 18 and `L` on the large or EEG pools: Traffic,
+  Pedestrian, LenDB, both S2Agri subsets, both DREAMER sets and WhaleSounds.
+* **Gain helps all but the largest pools.** `G` beats `L` on every pool under
+  100,000 training rows except WhaleSounds, and on MosquitoSound (215k, now 0.0024 ahead of
+  XGBoost) and TimeSen2Crop (832k). Five datasets that HashBoost lost in
+  the benchmark, four of them by 2-5x, now lead XGBoost: CrowdSourced, PAMAP2, UCIActivity,
+  WISDM and AudioMNIST-DS (0.0159 against 0.0293).
+* **Still behind:** both DREAMER sets by about 0.04 (no lever has moved them),
+  FordChallenge by 0.010, WISDM2 by 0.006, STEW by 0.0075, WhaleSounds by
+  0.0144 and TimeSen2Crop by 0.0056.
+* **HashBoost is now far cheaper than XGBoost.** Over the 24 datasets XGBoost
+  finished, it took 19,700 s; `G` took 3,368 s for all 25, `L` 3,907 s, `F`
+  1,120 s and `auto` (both runs) 7,275 s. `F` gives up at most 0.006 against
+  `G` on 19 datasets for a third of the time, but 0.016-0.038 on InsectSound,
+  MosquitoSound, Traffic and the S2Agri subsets, where the short budget stops
+  it early.
+
 ### benchmark
 
 This branch compares HashBoost against XGBoost on the five MONSTER datasets
