@@ -1,0 +1,15 @@
+# Whole-pool XGBoost on the five MONSTER datasets, the tree baseline the README
+# says no whole-pool comparison has had. Defaults (depth 6, lr 0.05, 256 bins,
+# up to 1,000 rounds), early-stopped on the tune slice. In memory on the card:
+# LenDB's 14.6 GB ellpack ran at 0.7 s/round there (README, `m3`). Serial, so
+# each run's timings are its own.
+#
+#     sbatch -c 8 --mem=64G --time=02:00:00 -J xgboost-full scripts/m3_job.sh \
+#         --stage Pedestrian,InsectSound,LenDB,Tiselac,Traffic \
+#         --serial scripts/m3_runs/xgboost_full.txt
+
+python scripts/stream_full.py --path "$DATA" --dataset Pedestrian --model xgboost --in-memory --cache-dir "$DATA/xgb-cache" --out results/xgboost-full
+python scripts/stream_full.py --path "$DATA" --dataset InsectSound --model xgboost --in-memory --cache-dir "$DATA/xgb-cache" --out results/xgboost-full
+python scripts/stream_full.py --path "$DATA" --dataset LenDB --model xgboost --in-memory --cache-dir "$DATA/xgb-cache" --out results/xgboost-full
+python scripts/stream_full.py --path "$DATA" --dataset Tiselac --model xgboost --in-memory --cache-dir "$DATA/xgb-cache" --out results/xgboost-full
+python scripts/stream_full.py --path "$DATA" --dataset Traffic --model xgboost --in-memory --cache-dir "$DATA/xgb-cache" --out results/xgboost-full
