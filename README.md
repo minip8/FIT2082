@@ -2,6 +2,36 @@
 
 ## Benchmarks
 
+### m3
+
+Runs on Monash's M3 cluster (setup, rules and measurements in `M3.md`). The
+first batch reran "More rounds per pass" on whole-pool LenDB, on one L40S, with
+the three arms sharing the GPU and the series staged in node-local `/tmp`
+(`2edfe9c`, job 61006266). One run per arm. Errors are means of the last
+seven evaluations:
+
+    sbatch -c 12 --mem=48G -J lendb-capacity scripts/m3_job.sh --stage LenDB \
+        --parallel scripts/m3_runs/lendb_capacity.txt
+
+| LenDB, 975,291 rows | rounds per batch | window | val error | train error | laptop val error | wall (shared GPU) |
+| --- | ---: | --- | ---: | ---: | ---: | ---: |
+| control | 1 | none | 0.0731 | 0.0605 | 0.0730 +- 0.0021 (9 runs) | 118s |
+| `h8_w2` | 8 | 2 epochs | 0.0479 | 0.0152 | 0.0461 | 143s |
+| `h16_w2` | 16 | 2 epochs | **0.0452** | 0.0142 | | 177s |
+
+* **M3 reproduces the laptop.** The control lands on the laptop's nine-run
+  mean, and 8 rounds per batch is within 0.002 of its laptop run.
+* **16 rounds per batch is 0.0027 ahead of 8, about 1.3 control sd.** That is
+  not yet a result. Training error barely moves (0.0152 to 0.0142), where
+  going from 1 to 8 rounds cut it fourfold, so capacity looks close to used up
+  at 8 bits. More seeds, or 32 rounds, would settle it.
+* **Sharing the GPU paid.** The three runs finished in 199 s of job time. Alone,
+  the control trains in 79 s and the wider arms take longer, so running them
+  one after another would take roughly twice as long. Each run slowed down,
+  QUANT most of all (32 s alone, 70-99 s shared), but the GPU went from 25% to
+  85% busy (2 s samples). Staging the 7.6 GB series took 6 s and cut the read
+  wait from 36 s to 0.
+
 ### benchmark
 
 This branch compares HashBoost against XGBoost on the five MONSTER datasets
