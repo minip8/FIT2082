@@ -360,6 +360,51 @@ on small pools:
 | LenDB | 152s (3900) | 164s (4150) | 128s (2450) |
 | Traffic | 64s (4550) | 57s (5000) | 126s (5000) |
 
+**Lever screen, round 2** (`557cd02`, jobs 61019081-61019084, same base,
+datasets and setup; `scripts/m3_runs/levers2.py`). It stacks the two levers
+and tries to stop gain overfitting the large pools. `glam` is GainSplitter's
+own lambda (default 1), `h16` 16 rounds per batch. One run each:
+
+| dataset | `base` | `gain64` | `gain64_l2_100` | `gain64_bits6` | `gain64_l2_100_bits6` | `gain256` | `gain16_l2_100` | `gain16_glam100` | `gain16_glam100_l2_10` | `gain4_l2_1` | `l2_100` | `l2_1_h16` | XGBoost |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| CrowdSourced | 0.0407 | **0.0048** | 0.0069 | 0.0063 | 0.0053 | 0.0058 | 0.0074 | 0.0111 | 0.0095 | 0.0175 | 0.0254 | 0.0365 | 0.0079 |
+| DREAMERA | 0.1292 | 0.1455 | 0.1421 | 0.1467 | 0.1343 | 0.1543 | 0.1311 | 0.1331 | 0.1238 | 0.1326 | 0.1194 | 0.1221 | **0.0818** |
+| FordChallenge | 0.1030 | 0.0615 | 0.0579 | 0.0608 | 0.0566 | 0.0618 | 0.0623 | 0.0825 | 0.0757 | 0.0818 | 0.0955 | 0.1047 | **0.0459** |
+| InsectSound | 0.2339 | 0.1982 | 0.1853 | **0.1833** | 0.1843 | 0.2048 | 0.1880 | 0.1941 | 0.1909 | 0.2017 | 0.2021 | 0.2170 | **0.1833** |
+| LenDB | 0.0554 | 0.0518 | 0.0461 | 0.0518 | 0.0454 | 0.0525 | 0.0464 | 0.0508 | 0.0439 | 0.0437 | 0.0422 | **0.0410** | 0.0471 |
+| PAMAP2 | 0.0457 | 0.0051 | **0.0032** | 0.0051 | 0.0049 | 0.0046 | 0.0054 | 0.0093 | 0.0088 | 0.0144 | 0.0315 | 0.0420 | 0.0083 |
+| STEW | 0.0879 | 0.0349 | 0.0312 | 0.0312 | 0.0303 | 0.0320 | 0.0391 | 0.0515 | 0.0422 | 0.0598 | 0.0742 | 0.0850 | **0.0242** |
+| Traffic | 0.3040 | 0.3147 | 0.3105 | 0.3196 | 0.3188 | 0.3157 | 0.3127 | 0.3103 | 0.3042 | 0.2871 | 0.2939 | **0.2827** | 0.3330 |
+| UCIActivity | 0.0481 | 0.0120 | 0.0108 | 0.0101 | **0.0089** | 0.0114 | 0.0120 | 0.0152 | 0.0127 | 0.0260 | 0.0412 | 0.0393 | 0.0203 |
+| WISDM | 0.0380 | 0.0121 | 0.0096 | 0.0113 | **0.0083** | 0.0125 | 0.0104 | 0.0175 | 0.0146 | 0.0163 | 0.0217 | 0.0338 | 0.0134 |
+
+`base` and `gain64` repeat round 1, which gives one rerun's spread. On the
+eight small or mid pools both moved by at most 0.005 (STEW's `gain64` 0.0378
+to 0.0349, InsectSound's `base` 0.2290 to 0.2339 being the largest
+changes) and usually by under 0.002. On the large pools `base` moved by 0.008:
+Traffic 0.2957 to 0.3040, LenDB 0.0474 to 0.0554. So a single gap under about
+0.005 on a small pool, or 0.01 on Traffic or LenDB, is not a result.
+
+* **On small pools the levers stack.** `gain64_l2_100_bits6` is best or within
+  0.002 of best on all seven, and passes XGBoost on UCIActivity (0.0089
+  against 0.0203), WISDM (0.0083 against 0.0134), PAMAP2 (0.0049 against
+  0.0083) and CrowdSourced (0.0053 against 0.0079). It ties InsectSound
+  (0.1843 against 0.1833, inside XGBoost's own 0.006 floor) and narrows STEW to
+  0.006 and FordChallenge to 0.011.
+* **More candidates stop helping at 64.** `gain256` is within 0.003 of `gain64`
+  everywhere, either way, and costs 2-4x the time.
+* **Nothing makes gain safe on Traffic.** No arm with 16 or more candidates is
+  ahead of `base`, with or without leaf L2 or a gain lambda of 100.
+  Only `gain4_l2_1` (0.2871) is ahead of `base`.
+* **The large pools want leaf L2 and capacity instead.** `l2_1_h16` is best on
+  Traffic (0.2827) and LenDB (0.0410); `l2_100` is close on both (0.2939,
+  0.0422) and best on DREAMERA (0.1194). Every LenDB arm with leaf L2 beats
+  XGBoost's 0.0471, by up to 0.006 -- inside LenDB's rerun spread for any one
+  arm, but consistent across all seven of them.
+* **DREAMERA stays out of reach.** Its best arm is 0.038 behind XGBoost, every
+  arm reaches zero training error, and gain makes it worse. Something about
+  that task, not the levers screened here, decides it.
+
 ### benchmark
 
 This branch compares HashBoost against XGBoost on the five MONSTER datasets
