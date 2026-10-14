@@ -57,6 +57,20 @@ its 14.6 GB cache to the job's `/tmp` and paged it every round, warning that
 the node has no CUDA heterogeneous memory management. At this rate the
 180-200 rounds that 65,536 rows needed would take about 1.5 h.
 
+`--in-memory` (`058f7b6`) builds an ordinary `QuantileDMatrix` from the same
+streamed batches, so the ellpack stays on the card. Same probe, job 61007930:
+
+| LenDB whole pool, 10 rounds, L40S alone | build | s/round | peak GPU | host RSS | val error at stop |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| external memory, paged from `/tmp` | 57s | 27.4 | 5.5 GB | 25.5 GB | 0.0591 (iter 7) |
+| `--in-memory` | 47s | **0.7** | 19.2 GB | 11.4 GB | 0.0591 (iter 7) |
+
+* **39x faster per round**, with the same model: every error and the stopping
+  round agree. A full 1,000-round LenDB run now takes about 12 minutes.
+* The ellpack took 15 GB on the device (1.9 GB before, 17.0 GB after building),
+  20 GB with training. Only LenDB's ellpack is large; the other four MONSTER
+  pools bin to under 0.3 GB.
+
 ### benchmark
 
 This branch compares HashBoost against XGBoost on the five MONSTER datasets
