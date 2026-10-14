@@ -33,10 +33,15 @@ the same dataset, so the curves here are directly comparable to
 the held-out slices are cut at -- `REFERENCE_N_REF` records the ones already
 run, and is what `--n-ref` defaults to.
 
-XGBoost early-stops on the `n_te` slice, the tune rows that `experiment.py`
-holds out as `X_tune`, and reports validation error at the round it stops on
-("tuned"), so nothing is chosen on validation. Whole-pool XGBoost runs before
-this stopped on validation itself.
+Both models choose their stopping point on the `n_te` slice, the tune rows
+that `experiment.py` holds out as `X_tune`, and report validation error there
+("tuned"), so nothing is chosen on validation. XGBoost early-stops per round.
+HashBoost evaluates every `--eval-every` batches, reports validation at its
+best tune evaluation, and with `--patience-batches` also stops once that
+evaluation is that many batches old. `--max-batches` caps its budget and
+`--active-batches` sets its frozen window, both in batches, so that one
+setting means the same on every pool size. Whole-pool XGBoost runs before
+`d35f449` stopped on validation itself.
 
     uv run python scripts/stream_full.py --dataset LenDB --model hashboost --epochs 5
     uv run python scripts/stream_full.py --dataset Traffic --model xgboost \
@@ -448,16 +453,25 @@ def run_hashboost(
     # across runs. Each batch adds `hashes_per_round` hashes to every estimator,
     # which is what `max_num_hashes` has to be sized for.
     total_rounds = args.epochs * len(stream)
+    # a cap in batches, so that one budget means the same on every pool size:
+    # 50 epochs are 400 batches of InsectSound and 14,200 of Traffic
+    if args.max_batches:
+        total_rounds = min(total_rounds, args.max_batches)
 
     # The frozen-round window, in hashes. The cache it enables is keyed by row
     # id -- the rows' indices into the .npy, as `with_rows` yields them -- so it
     # holds (largest index) x classes floats on the device and one int64 per
     # index on the host: 10 MB each for LenDB.
-    active_rounds = (
-        max(1, round(args.active_epochs * len(stream) * args.hashes_per_round))
-        if args.active_epochs
-        else None
-    )
+    # `--active-batches` gives it in batches, which mean the same on every pool;
+    # an epoch is 8 batches of InsectSound and 284 of Traffic.
+    if args.active_batches:
+        active_rounds = args.active_batches * args.hashes_per_round
+    elif args.active_epochs:
+        active_rounds = max(
+            1, round(args.active_epochs * len(stream) * args.hashes_per_round)
+        )
+    else:
+        active_rounds = None
 
     kwargs: dict[str, Any] = {
         "num_classes": num_classes,
@@ -475,6 +489,9 @@ def run_hashboost(
         "max_epochs": args.epochs,
         "estimators": args.estimators,
         "active_epochs": args.active_epochs,
+        "active_batches": args.active_batches,
+        "max_batches": args.max_batches,
+        "patience_batches": args.patience_batches,
         "prefetch": args.prefetch,
     }
 
@@ -489,7 +506,7 @@ def run_hashboost(
     )
 
     print(
-        f"  {len(stream)} batches/epoch x {args.epochs} epochs = {total_rounds} rounds"
+        f"  {len(stream)} batches/epoch, up to {total_rounds} rounds"
         f" ({total_rounds * args.hashes_per_round * args.estimators} hashes over "
         f"{args.estimators} estimator(s))",
         flush=True,
@@ -500,7 +517,7 @@ def run_hashboost(
     # the part of it the training loop sat waiting for; serially they are equal.
     batches = Prefetch(stream.epochs(args.epochs), depth=args.prefetch)
 
-    records: dict[str, list[tuple[int, float]]] = {"tr": [], "va": []}
+    records: dict[str, list[tuple[int, float]]] = {name: [] for name in holdouts}
     peak_mb = gpu_used_mb(device)
     read_wait_s = 0.0
     transform_s = 0.0
@@ -584,7 +601,9 @@ def run_hashboost(
 
         del Z, Y
 
-        if rounds % args.eval_every == 0 or rounds == total_rounds:
+        evaluated = rounds % args.eval_every == 0 or rounds == total_rounds
+
+        if evaluated:
             mark = time.perf_counter()
             evaluate()
             eval_s += time.perf_counter() - mark
@@ -617,12 +636,24 @@ def run_hashboost(
 
             print(
                 f"    round {rounds:5d}/{total_rounds}  "
-                f"tr={records['tr'][-1][1]:.4f} va={records['va'][-1][1]:.4f}  "
+                f"tr={records['tr'][-1][1]:.4f} va={records['va'][-1][1]:.4f} "
+                f"tune={records['tune'][-1][1]:.4f}  "
                 f"{time.perf_counter() - wall:6.0f}s (fit {fit_s:4.0f}s)  "
                 f"gpu {gpu_used_mb(device):5.0f} MB"
                 f"  rss {host_rss_mb():5.0f} MB  avail {host_available_mb():5.0f} MB",
                 flush=True,
             )
+
+        if rounds >= total_rounds:
+            break
+
+        # Early stopping on the tune slice, as XGBoost gets: stop once its
+        # best evaluation is `patience_batches` old. On 4,096 rows consecutive
+        # evaluations differ by up to 0.01, so the patience has to be long.
+        if evaluated and args.patience_batches:
+            best_round = min(records["tune"], key=lambda r: r[1])[0]
+            if rounds - best_round >= args.patience_batches:
+                break
 
     elapsed = {
         "phase": "train",
@@ -631,16 +662,28 @@ def run_hashboost(
     }
 
     va = [e for _, e in records["va"]]
+    # validation error at the evaluation with the lowest tune error, the first
+    # if several tie: chosen on the tune slice, as XGBoost's stopping round is
+    tune = [e for _, e in records["tune"]]
+    best = min(range(len(tune)), key=tune.__getitem__)
+    tuned = va[best]
+    best_round = records["tune"][best][0]
 
     print(
         f"  {rounds} rounds in {elapsed['wall_s']:.0f}s "
         f"({batches.busy_s:.0f}s reading, {read_wait_s:.0f}s of it waited on; "
         f"{transform_s:.0f}s transforming, {fit_s:.0f}s fitting)  "
-        f"va_final={va[-1]:.4f} va_best={min(va):.4f}",
+        f"va_final={va[-1]:.4f} va_best={min(va):.4f} "
+        f"tuned_va={tuned:.4f} (round {best_round})",
         flush=True,
     )
 
-    return entry(elapsed)
+    return {
+        **entry(elapsed),
+        "early_stopping": "tune",
+        "tuned": tuned,
+        "best_round": best_round,
+    }
 
 
 # == xgboost ===================================================================
@@ -1005,6 +1048,26 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=0.1)
     parser.add_argument("--eval-every", type=int, default=20)
     parser.add_argument(
+        "--max-batches",
+        type=int,
+        default=0,
+        help="stop after this many batches, whatever --epochs allows (0 = no cap)",
+    )
+    parser.add_argument(
+        "--active-batches",
+        type=int,
+        default=0,
+        help="frozen window in batches, which overrides --active-epochs "
+        "(0 = use --active-epochs)",
+    )
+    parser.add_argument(
+        "--patience-batches",
+        type=int,
+        default=0,
+        help="stop once the tune slice's best evaluation is this many batches "
+        "old (0 = train to the end)",
+    )
+    parser.add_argument(
         "--hashes-per-round",
         type=int,
         default=1,
@@ -1157,12 +1220,11 @@ def main() -> None:
     )
 
     # the held-out slices are small enough to keep as features on the device.
-    # xgboost early-stops on the tune slice -- the `n_te` rows after validation,
-    # as in xgboost_baseline.py -- so that nothing is chosen on validation. It
-    # goes last, because early stopping watches the last eval set.
-    held = [("tr", tr[: args.eval_subsample]), ("va", va)]
-    if args.model == "xgboost":
-        held.append(("tune", te))
+    # Both models choose their stopping point on the tune slice -- the `n_te`
+    # rows after validation, as in xgboost_baseline.py -- so that nothing is
+    # chosen on validation. It goes last, because xgboost's early stopping
+    # watches the last eval set.
+    held = [("tr", tr[: args.eval_subsample]), ("va", va), ("tune", te)]
     holdouts = {}
     for name, indices in held:
         raw, y = stream.gather(indices)
