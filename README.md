@@ -168,6 +168,39 @@ rounds per batch carries about 0.005 of run-to-run spread:
   from the sketch batching (InsectSound, above) is about 0.006, so every one of
   these gaps clears it.
 
+**LenDB: the same grid** (`63b1b1f`, job 61010514, one L40S, alone and in
+series, whole pool, 5 epochs; `scripts/m3_runs/lendb_window.txt`). Rounds still
+updated per batch are window x 239 batches x rounds per batch. One run each.
+The isolated `h16_w2` runs above read 0.0433 and 0.0428, and the laptop
+control's sd is 0.0021:
+
+| arm | rounds updated per batch | train | `fit_batch` | val error | train error |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `h8_w2` | 3,824 | 54s | 21s | 0.0460 | 0.0155 |
+| `h8_w1` | 1,912 | 48s | 15s | 0.0488 | 0.0146 |
+| `h8_w0.5` | 956 | 48s | 15s | 0.0519 | 0.0173 |
+| `h16_w2` | 7,648 | 86s | 52s | 0.0437 | 0.0155 |
+| `h16_w1` | 3,824 | 68s | 34s | **0.0432** | 0.0147 |
+| `h16_w0.5` | 1,912 | 57s | 23s | 0.0448 | 0.0171 |
+| XGBoost, whole pool | | 205s (with build) | | 0.0471 | 0.0369 |
+
+* **QUANT and reading set a floor of about 42 s** (32 s and 9 s on every arm),
+  so a narrower window saves at most `fit_batch`, which is under 52 s here.
+  Below 1 epoch, 8 rounds per batch stops getting faster at all (15 s twice).
+* **At 16 rounds per batch a 1-epoch window is again free** (0.0432 against
+  0.0437 and the earlier 0.0428-0.0433). Half an epoch costs about 0.0013.
+* **At 8 rounds per batch the window costs accuracy,** unlike on Traffic:
+  0.0028 at 1 epoch (about 1.3 control sd) and 0.0059 at half an epoch
+  (about 3 sd), for no time saved below 1 epoch.
+* **Every HashBoost arm is 2.4-4.3x faster than whole-pool XGBoost.** At 16
+  rounds per batch all three windows lead it by 0.002-0.004: `h16_w1` in 68 s
+  against 205 s. Those gaps are 1-2 control sd, and inside the ~0.006 that
+  sketch batching moved XGBoost on InsectSound, so on LenDB the accuracy is
+  level and the speed is HashBoost's.
+* **Across both datasets, 16 rounds per batch with a 1-epoch window** is the
+  most accurate arm and never costs accuracy against 2 epochs. It is the
+  candidate to rerun with more seeds.
+
 ### benchmark
 
 This branch compares HashBoost against XGBoost on the five MONSTER datasets
