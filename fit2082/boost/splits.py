@@ -10,6 +10,7 @@ from typing import Protocol
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 try:
     import triton
@@ -279,6 +280,12 @@ class GainSplitter:
     untouched; only which predicates get picked changes. With `candidates=1`
     it picks the hard-pair splits the base splitter would have, in another
     order. Everything stays on the device: the argmax is never read back.
+
+    A bit splits each existing cell in two, so a candidate's right half is its
+    parent cell less its left half, and the left halves of every candidate in
+    every cell are one matmul: (candidates, n) sides against the (n, cells x
+    2k) per-cell stats. A scatter of the (n, candidates, 2k) stats did the
+    same at 20-50 ms per batch at 64 candidates, most of a gain run's fitting.
     """
 
     def __init__(
@@ -287,7 +294,6 @@ class GainSplitter:
         lam: float = 1.0,
         base: Splitter | None = None,
         generator: torch.Generator | None = None,
-        chunk_bytes: int = 256 << 20,
     ) -> None:
 
         if candidates < 1:
@@ -296,7 +302,6 @@ class GainSplitter:
         self.candidates = candidates
         self.lam = lam
         self.base = base or HardPairSplitter(generator=generator)
-        self.chunk_bytes = chunk_bytes
 
     def propose(
         self,
@@ -315,49 +320,43 @@ class GainSplitter:
         n, k = gradient.shape
         c = features.shape[0]
 
-        # (n, c): which side of each candidate's split every row falls on
-        left = (X[:, features] <= midpoints).to(torch.int64)
+        # (c, n): which side of each candidate's split every row falls on
+        left = (X[:, features] <= midpoints).t().to(gradient.dtype)
         stats = torch.cat([gradient, hessian], 1)
 
         cell = torch.zeros(n, dtype=torch.int64, device=X.device)
         used = torch.zeros(c, dtype=torch.bool, device=X.device)
         picks = []
 
-        # candidates per scatter, so the expanded (n, chunk, 2k) stats stay
-        # within `chunk_bytes` even at 82 classes
-        chunk = max(1, self.chunk_bytes // (n * 2 * k * 4))
-
         for level in range(num_bits):
-            cells = 2 ** (level + 1)
-            score = torch.empty(c, device=X.device)
+            parents = 2**level
 
-            for a in range(0, c, chunk):
-                b = min(a + chunk, c)
-                child = cell[:, None] * 2 + left[:, a:b]
-                flat = child + torch.arange(b - a, device=X.device) * cells
+            # (n, parents x 2k): each row's stats in its own cell's columns
+            spread = (
+                F.one_hot(cell, parents).to(stats.dtype)[:, :, None] * stats[:, None, :]
+            ).reshape(n, parents * 2 * k)
 
-                sums = torch.zeros(
-                    ((b - a) * cells, 2 * k), dtype=stats.dtype, device=X.device
-                )
-                sums.index_add_(
-                    0,
-                    flat.reshape(-1),
-                    stats[:, None, :].expand(n, b - a, 2 * k).reshape(-1, 2 * k),
-                )
-                sums = sums.view(b - a, cells, 2 * k)
+            parent = spread.sum(0).view(parents, 2 * k)
+            low = (left @ spread).view(c, parents, 2 * k)
+            high = parent - low
+            # the subtraction can leave a hessian a rounding error below zero
+            high[..., k:].clamp_(min=0)
 
-                score[a:b] = (sums[..., :k].square() / (sums[..., k:] + self.lam)).sum(
-                    (1, 2)
-                )
+            score = self._score(low, k) + self._score(high, k)
 
             best = score.masked_fill(used, -torch.inf).argmax()
             used[best] = True
             picks.append(best)
-            cell = cell * 2 + left[:, best]
+            cell = cell * 2 + left[best].to(torch.int64)
 
         chosen = torch.stack(picks)
 
         return features[chosen], midpoints[chosen]
+
+    def _score(self, sums: torch.Tensor, k: int) -> torch.Tensor:
+        """(c, cells, 2k) gradient and hessian sums -> (c,) summed G**2 / (H + lam)."""
+
+        return (sums[..., :k].square() / (sums[..., k:] + self.lam)).sum((1, 2))
 
     def __repr__(self) -> str:
 
