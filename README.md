@@ -201,6 +201,98 @@ control's sd is 0.0021:
   most accurate arm and never costs accuracy against 2 epochs. It is the
   candidate to rerun with more seeds.
 
+**Whole-pool MONSTER benchmark** (`4c0b99c`, jobs 61012935-61012938, four
+L40S, each alone and in series, series staged;
+`scripts/m3_runs/monster_benchmark.py` writes the run lists and documents the
+splits and the three datasets left out). Four HashBoost configurations, fixed
+from the two grids above before any other dataset was run, against whole-pool
+XGBoost in memory. Both follow the boosted-tree convention, a generous cap with
+the stopping point chosen on the tune slice:
+
+* `default`: 1 round per batch, no window (the reference algorithm)
+* `fast`: 8 rounds per batch, 128-batch window
+* `balanced`: 8 rounds per batch, 512-batch window
+* `accurate`: 16 rounds per batch, 256-batch window
+* HashBoost trains for up to 5,000 batches, evaluates every 50, and stops once
+  its best tune evaluation is 1,000 batches old. XGBoost runs up to 1,000
+  rounds (learning rate 0.05, depth 6) with 50 rounds of patience.
+
+Val error is at the tune-chosen point, one run each. Time is HashBoost's
+training including QUANT, or XGBoost's ellpack build (its QUANT pass) plus
+training. "cap" marks a run whose best point was within 50 batches or rounds
+of its cap. The best of each row is bold:
+
+| dataset | train rows | `default` | `fast` | `balanced` | `accurate` | XGBoost |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| AudioMNIST-DS | 15,808 | 0.0400 (282s) | 0.0361 (285s) | 0.0393 (154s) | 0.0374 (350s) | **0.0293** (378s) |
+| CornellWhaleChallenge | 15,808 | 0.1528 (172s) | 0.1362 (260s) | 0.1353 (226s) | 0.1423 (125s) | **0.1316** (49s) |
+| CrowdSourced | 5,674 | 0.0391 (164s) | 0.0402 (150s) | 0.0423 (89s) | 0.0370 (168s) | **0.0079** (51s) |
+| DREAMERA | 132,446 | 0.1560 (342s) cap | 0.1296 (356s) | 0.1299 (398s) | 0.1575 (134s) | **0.0818** (324s) |
+| DREAMERV | 132,446 | 0.1450 (340s) | 0.1426 (254s) | 0.1416 (347s) | 0.1555 (388s) | **0.0811** (404s) |
+| FordChallenge | 20,811 | 0.1165 (80s) | 0.1057 (85s) | 0.1042 (72s) | 0.1067 (68s) | **0.0459** (23s) |
+| FruitFlies | 19,422 | 0.0596 (546s) cap | 0.0618 (250s) | 0.0610 (279s) | 0.0576 (292s) | **0.0496** (209s) |
+| InsectSound | 32,768 | 0.2231 (35s) | 0.2263 (28s) | 0.2227 (47s) | 0.2244 (73s) | **0.1833** (131s) |
+| LakeIce | 95,232 | 0.0024 (14s) | **0.0017** (22s) | **0.0017** (54s) | 0.0020 (76s) | 0.0024 (6s) |
+| LenDB | 975,291 | 0.0498 (155s) | 0.0479 (152s) | **0.0437** (200s) | 0.0439 (132s) | 0.0471 (208s) |
+| MosquitoSound | 215,460 | 0.1262 (353s) cap | 0.1245 (161s) | 0.1189 (446s) | 0.1189 (339s) | **0.1018** (1632s) |
+| Opportunity | 7,312 | 0.1174 (852s) | 0.1129 (535s) | **0.1104** (1254s) | 0.1117 (450s) | out of memory |
+| PAMAP2 | 20,769 | 0.0483 (433s) | 0.0452 (324s) | 0.0454 (399s) | 0.0435 (640s) | **0.0083** (436s) |
+| Pedestrian | 143,504 | 0.1934 (38s) | **0.1780** (145s) | 0.1831 (507s) | 0.1782 (1384s) | 0.1924 (66s) |
+| S2Agri-10pc-17 | 4,653,666 | 0.0667 (48s) cap | **0.0203** (119s) cap | 0.0281 (168s) | 0.0261 (483s) | 0.1770 (2811s) cap |
+| S2Agri-10pc-34 | 4,653,666 | 0.0696 (55s) | **0.0200** (151s) | 0.0527 (170s) | 0.0259 (569s) | 0.1836 (4870s) cap |
+| STEW | 13,192 | 0.0935 (286s) | 0.0864 (197s) | 0.0862 (171s) | 0.0869 (157s) | **0.0242** (134s) |
+| Skoda | 6,774 | 0.1333 (515s) | 0.1306 (396s) | 0.1293 (363s) | 0.1231 (846s) | **0.0620** (182s) A100 |
+| TimeSen2Crop | 831,779 | 0.0500 (328s) | 0.0435 (316s) | 0.0425 (495s) cap | 0.0459 (687s) | **0.0232** (7188s) |
+| Tiselac | 71,715 | 0.0720 (18s) | 0.0662 (26s) | 0.0686 (48s) | 0.0725 (68s) | **0.0649** (55s) |
+| Traffic | 1,160,582 | 0.3606 (36s) cap | 0.3020 (64s) | 0.2830 (160s) | **0.2761** (303s) | 0.3330 (57s) |
+| UCIActivity | 4,740 | 0.0450 (70s) | 0.0475 (44s) | 0.0481 (41s) | 0.0450 (74s) | **0.0203** (22s) |
+| USCActivity | 34,868 | 0.0967 (69s) | 0.0972 (49s) | 0.0955 (194s) | 0.0952 (339s) cap | **0.0723** (104s) |
+| WISDM | 7,195 | 0.0384 (21s) | 0.0342 (29s) | 0.0359 (53s) | 0.0380 (49s) | **0.0134** (10s) |
+| WISDM2 | 89,902 | 0.0286 (46s) | 0.0261 (73s) | 0.0261 (143s) | 0.0261 (151s) | **0.0146** (50s) |
+| WhaleSounds | 75,938 | 0.3279 (235s) | 0.3169 (222s) | 0.3113 (283s) | 0.3091 (227s) | **0.2947** (298s) |
+
+All 130 runs on the L40S finished except two XGBoost runs that ran out of its
+46 GB. Opportunity's 117,746 QUANT features needed 27 GB more than was free;
+Skoda's failed the same way. Rerunning both unchanged on an A100-80G (job
+61017027, `scripts/m3_runs/monster_xgb_a100.txt`), Skoda fit at a 35 GB peak (marked
+A100: its accuracy compares, its time does not), but Opportunity asked for
+55 GB beyond the 30 GB it held and failed again, so it has no XGBoost number.
+The four jobs took 1.7-4.0 h, with the GPU 85-97% busy.
+
+* **XGBoost wins most of MONSTER.** Even crediting HashBoost with the best of
+  its four configurations, which is chosen on validation and flatters it, it
+  is more than 0.006 ahead on 4 of 25 datasets (Traffic, Pedestrian and the
+  two S2Agri subsets), level on 4 (LenDB, LakeIce, Tiselac,
+  CornellWhaleChallenge) and behind on 17. Taken one configuration at a time,
+  `fast` and `balanced` each win 4, tie 4 and lose 17; `accurate` 4, 2 and 19;
+  `default` 2, 3 and 20.
+* **The losses are large, not marginal.** On CrowdSourced, PAMAP2, STEW,
+  WISDM, FordChallenge and Skoda XGBoost's error is 2-5x smaller (PAMAP2 0.0083
+  against 0.0435), and DREAMERA and DREAMERV lose by about 0.05-0.06 on
+  132,446 rows. It is not capacity: `balanced` reaches zero training error on
+  DREAMERA, DREAMERV, CrowdSourced, PAMAP2 and STEW (XGBoost 0.0215 and 0.0117 on the two DREAMER sets), so
+  HashBoost fits the pool and generalises worse. A plausible reading, not yet
+  tested, is that these tasks hinge on a few precise thresholds that greedy
+  trees find and random hash partitions only approximate.
+* **The S2Agri wins do not count yet.** XGBoost was still learning when it hit
+  the 1,000-round cap: training error 0.173 at round 999 and falling, against
+  HashBoost's 0.002. At learning rate 0.05 on 4.65 M rows the cap binds, so
+  these need a higher cap (each run already took 47-81 min). Traffic's win
+  stands: XGBoost early-stopped there well inside its cap.
+* **HashBoost's clean wins are on large pools** (Traffic 1.16 M rows by 0.057,
+  Pedestrian 143,504 by 0.014), but size alone does not decide it:
+  TimeSen2Crop (832k) and MosquitoSound (215k) go to XGBoost by 0.017-0.019.
+* **No configuration dominates.** `fast` and `balanced` are each best on 9
+  datasets and `accurate` on 7, but the gaps between them are mostly inside
+  0.006. `default` is clearly worst on the large pools (Traffic 0.361 against
+  0.276) and best nowhere outright. Rounds per batch matter more than the
+  window.
+* **The budget is wasteful on small pools.** 5,000 batches of 4,096 rows is
+  thousands of epochs of a 7,000-row pool, and 1,000 batches of patience
+  dominate: Opportunity's `balanced` took 21 minutes on 7,312 rows. A budget in
+  epochs with a floor in batches would cut this without touching the large
+  pools.
+
 ### benchmark
 
 This branch compares HashBoost against XGBoost on the five MONSTER datasets

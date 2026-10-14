@@ -1,0 +1,9 @@
+# The two XGBoost runs that ran out of the L40S's 46 GB (Opportunity: 117,746
+# QUANT features). Same settings, on an A100-80G; accuracy is comparable,
+# timing is not.
+#
+#     sbatch --gres=gpu:A100:1 -c 8 --mem=64G --time=03:00:00 -J monster-xgb \
+#         scripts/m3_job.sh --stage Opportunity,Skoda --serial scripts/m3_runs/monster_xgb_a100.txt
+
+python scripts/stream_full.py --path "$DATA" --dataset Opportunity --n-ref 7312 --n-va 2436 --n-te 2436 --out results/monster-benchmark --model xgboost --in-memory --label xgboost_a100
+python scripts/stream_full.py --path "$DATA" --dataset Skoda --n-ref 6774 --n-va 2258 --n-te 2258 --out results/monster-benchmark --model xgboost --in-memory --label xgboost_a100
