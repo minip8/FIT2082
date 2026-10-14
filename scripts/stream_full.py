@@ -564,9 +564,10 @@ def run_hashboost(
         "splitter": repr(splitter),
         "feature_cache_gb": args.feature_cache_gb,
         "readout": args.readout,
+        "model_seed": args.model_seed,
     }
 
-    torch.manual_seed(args.seed)
+    torch.manual_seed(args.model_seed)
 
     # Bagging shares the stream: each batch is read and transformed once and
     # handed to every estimator, so the I/O is not paid E times over.
@@ -1160,6 +1161,13 @@ def main() -> None:
         "control on a smaller pool sit beside the full run in one file.",
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--model-seed",
+        type=int,
+        default=None,
+        help="seed for the model and the batch shuffle (default: --seed). "
+        "--seed also draws the split, so this reruns a model on the same rows",
+    )
     parser.add_argument("--transform", default="quant", choices=("quant", "pulsar"))
     parser.add_argument(
         "--fit-rows",
@@ -1339,6 +1347,9 @@ def main() -> None:
 
     device = args.device
 
+    if args.model_seed is None:
+        args.model_seed = args.seed
+
     if args.n_ref is None:
         args.n_ref = REFERENCE_N_REF.get(args.dataset, DEFAULT_N_REF)
 
@@ -1363,7 +1374,7 @@ def main() -> None:
         path_Y,
         tr,
         args.batch_size,
-        seed=args.seed,
+        seed=args.model_seed,
         drop_cache_every=args.drop_cache_every,
         random_access=args.random_access,
     )
