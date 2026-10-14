@@ -32,6 +32,31 @@ seven evaluations:
   85% busy (2 s samples). Staging the 7.6 GB series took 6 s and cut the read
   wait from 36 s to 0.
 
+The same three arms on whole-pool Traffic (`3ba5ee4`, job 61007295, shared
+L40S, `scripts/m3_runs/traffic_capacity.txt`):
+
+| Traffic, 1,160,582 rows | rounds per batch | window | val error | train error | laptop val error | `fit_batch` (shared GPU) |
+| --- | ---: | --- | ---: | ---: | ---: | ---: |
+| control | 1 | none | 0.3924 | 0.3432 | 0.3902 +- 0.0032 (5 runs) | 35s |
+| `h8_w2` | 8 | 2 epochs | 0.3035 | 0.1249 | 0.3034 | 196s |
+| `h16_w2` | 16 | 2 epochs | **0.2931** | 0.0744 | | 416s |
+
+* **Again M3 matches the laptop:** the control is within its spread, and 8 rounds
+  per batch is 0.0001 from its laptop run.
+* **On Traffic, 16 rounds per batch beat 8 by 0.0104, about 3 control sd,**
+  and training error fell from 0.125 to 0.074. It is one run each, but unlike
+  LenDB, Traffic is still bound by capacity at 8 rounds. 32 rounds per batch,
+  or wider tables, is the next step. It costs time: Traffic is bound by the
+  model, and `fit_batch` doubled from 8 to 16 rounds.
+* The GPU was 91% busy over the 7.5 minute batch.
+
+Whole-pool XGBoost on LenDB, a 10-round probe run alone (`3ba5ee4`, job
+61007294, L40S, series staged, `--cache-host-ratio 1.0`): the ellpack built in
+57 s (353 s on the laptop) and rounds took 27.4 s (116 s). XGBoost still wrote
+its 14.6 GB cache to the job's `/tmp` and paged it every round, warning that
+the node has no CUDA heterogeneous memory management. At this rate the
+180-200 rounds that 65,536 rows needed would take about 1.5 h.
+
 ### benchmark
 
 This branch compares HashBoost against XGBoost on the five MONSTER datasets
