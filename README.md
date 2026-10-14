@@ -71,6 +71,37 @@ streamed batches, so the ellpack stays on the card. Same probe, job 61007930:
   20 GB with training. Only LenDB's ellpack is large; the other four MONSTER
   pools bin to under 0.3 GB.
 
+**Whole-pool XGBoost on all five** (`457b3f0`, job 61008034, one L40S, runs in
+series and alone, `--in-memory`, defaults, tune-stopped;
+`scripts/m3_runs/xgboost_full.txt`). The whole job took 9 minutes. Val error
+is at the tune-stopped round. "65,536 rows" is the benchmark's tune-stopped
+XGBoost ("Against XGBoost"). HashBoost is the best whole-pool arm above, as a
+mean of its last seven evaluations. One run each:
+
+| dataset | train rows | rounds (best) | train | XGBoost, 65,536 rows | XGBoost, whole pool | HashBoost, whole pool |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Pedestrian | 143,504 | 380 (329) | 64s | 0.2092 | **0.1924** | |
+| InsectSound | 32,768 | 548 (497) | 128s | 0.1907 | **0.1833** | |
+| LenDB | 975,291 | 223 (172) | 159s + 46s build | 0.0464 | 0.0471 | **0.0452** (16 rounds per batch) |
+| Tiselac | 71,715 | 595 (544) | 54s | 0.0667 | 0.0649 | |
+| Traffic | 1,160,582 | 974 (923) | 49s | 0.4067 | 0.3330 | **0.2931** (16 rounds per batch) |
+
+* **More data helps XGBoost most on Traffic,** 0.4067 to 0.3330 with 18x the
+  rows, and it was still improving: it stopped at round 974 of the 1,000
+  cap, with training error 0.299, so the cap is binding. A rerun with a higher
+  `--num-boost-round` is needed before Traffic's gap means anything.
+* **LenDB gains nothing from 15x the rows** (0.0464 to 0.0471). Whole-pool
+  HashBoost at 16 rounds per batch is 0.002 ahead of it, about one control sd.
+* **InsectSound trained on exactly the benchmark's 32,768 rows,** because its
+  pool has nothing beyond the reference run, yet it moved from 0.1907 to 0.1833.
+  The settings are the same as `xgboost_baseline.py`'s. What differs is the
+  pipeline: streamed batches in shuffled order, a sketch built over those
+  batches, and its own QUANT pass. That gap is unexplained and bounds how much
+  any whole-pool difference on these datasets can be trusted.
+* **Timings are clean** (`context.shared_gpu` false), but HashBoost's
+  whole-pool times above are from shared runs, so there is no fair speed
+  comparison yet.
+
 ### benchmark
 
 This branch compares HashBoost against XGBoost on the five MONSTER datasets
