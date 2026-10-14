@@ -797,14 +797,15 @@ def readout(
 ) -> dict[str, Any]:
     """Refit the finished model's leaf tables jointly (`fit2082.boost.readout`).
 
-    It trains on the whole pool, so it needs the feature cache, and stops on
-    the tune slice as boosting does. The model it refits is the final one, not
-    the tune-chosen round, so its validation error is quoted beside `tuned`
-    rather than in place of it.
+    It trains on the whole pool, so it needs the feature cache and is skipped
+    without it. It stops on the tune slice, as boosting does. The model it
+    refits is the final one, not the tune-chosen round, so its validation error
+    is quoted beside `tuned` rather than in place of it.
     """
 
     if cache is None:
-        raise SystemExit("--readout needs the feature cache (--feature-cache-gb)")
+        print("  readout skipped: the pool's features are not cached", flush=True)
+        return {"skipped": "no feature cache"}
 
     mark = time.perf_counter()
     fitted, info = fit_readout(
