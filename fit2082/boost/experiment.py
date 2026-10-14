@@ -32,6 +32,7 @@ from fit2082.boost.readout import fit_readout
 from fit2082.demo.utils import Dataset
 from fit2082.pulsar.pulsar import Pulsar
 from fit2082.quant.quant import Quant
+from fit2082.results import run_context
 
 # == data ======================================================================
 
@@ -708,6 +709,9 @@ def main() -> None:
             args.device,
             args.compile,
         )
+        # where it ran, and whether it shared the GPU (fit2082.results)
+        if context := run_context():
+            entry["context"] = context
         models[name] = entry
         write()
 

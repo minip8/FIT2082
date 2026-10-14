@@ -10,7 +10,9 @@ so that a plot reading one file does not care which model came from where.
 """
 
 import json
+import os
 import resource
+import socket
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -34,6 +36,33 @@ def commit_hash(short: bool = True) -> str:
         ).strip()
     except (subprocess.SubprocessError, OSError):
         return "unknown"
+
+
+def run_context() -> dict[str, Any]:
+    """Where a run executed, so that its timings can be read for what they are.
+
+    On M3, `scripts/m3_job.sh --parallel` runs several commands on one GPU at
+    once and sets `FIT2082_GPU_RUNS` to how many. Sharing the GPU slowed a LenDB
+    stream's QUANT from 32 s to 99 s (README, `m3`), so a shared run's timings
+    measure the contention and are not comparable with a run alone. Outside a
+    Slurm job this is empty, and result files written on the laptop are
+    unchanged.
+    """
+
+    job = os.environ.get("SLURM_JOB_ID")
+
+    if job is None:
+        return {}
+
+    runs = int(os.environ.get("FIT2082_GPU_RUNS", "1"))
+
+    return {
+        "host": socket.gethostname(),
+        "slurm_job": job,
+        "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        "gpu_runs": runs,
+        "shared_gpu": runs > 1,
+    }
 
 
 # == memory ====================================================================
@@ -139,7 +168,15 @@ def write_results(out: Path, models: dict[str, Any], info: dict[str, Any]) -> Pa
     discarding what is already there. Callers write after every model for the
     same reason `experiment.py` does: these runs are long, and a crash in the
     expensive one should not cost the cheap ones.
+
+    Each model entry also gets the `run_context`, per entry rather than per
+    file, because one file can gather models from different jobs.
     """
+
+    context = run_context()
+
+    if context:
+        models = {name: {**entry, "context": context} for name, entry in models.items()}
 
     payload: dict[str, Any] = {}
 

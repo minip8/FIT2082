@@ -25,6 +25,14 @@
 #                    $DATA. One LenDB stream used 2 GB of the L40S's 46 GB and
 #                    kept it 25% busy, so several arms fill each other's stalls.
 #                    Give each line its own --out: the processes write at once.
+#                    Sharing slowed each run (QUANT 32 s alone, 99 s shared), so
+#                    use it for accuracy, not for timings.
+#   --serial FILE    run the lines one after another instead: one queue wait
+#                    and one allocation, and each run's timings are its own.
+#
+# Every result file written in a job records it in its model entries (`context`,
+# from `fit2082.results.run_context`): the job, host and GPU, `gpu_runs` (how
+# many runs shared the GPU) and `shared_gpu`.
 #
 # The defaults name an L40S, which beat an A100 on every stage of the LenDB
 # stream and waited a fifth as long to start (M3.md). A job prints its node,
@@ -44,17 +52,19 @@
 
 set -euo pipefail
 
-usage="usage: sbatch [sbatch flags] scripts/m3_job.sh [--stage A,B] (--parallel FILE | <command> [args...])"
+usage="usage: sbatch [sbatch flags] scripts/m3_job.sh [--stage A,B] (--parallel FILE | --serial FILE | <command> [args...])"
 stage=""
-parallel=""
+mode=single
+file=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --stage) stage=$2; shift 2 ;;
-        --parallel) parallel=$2; shift 2 ;;
+        --parallel) mode=parallel; file=$2; shift 2 ;;
+        --serial) mode=serial; file=$2; shift 2 ;;
         *) break ;;
     esac
 done
-if [ -z "$parallel" ] && [ $# -eq 0 ]; then
+if [ "$mode" = single ] && [ $# -eq 0 ]; then
     echo "$usage" >&2
     exit 2
 fi
@@ -101,32 +111,51 @@ sampler=$!
 
 start=$SECONDS
 status=0
-if [ -z "$parallel" ]; then
+# one log per line, and the end of each copied into the job's own log
+report() {
+    echo
+    echo "run $1    exit $2 after $((SECONDS - start)) s, ending:"
+    tail -n 3 "$base.$1.out" | sed 's/^/         /'
+}
+
+if [ "$mode" = single ]; then
+    export FIT2082_GPU_RUNS=1
     # a literal $DATA in the arguments becomes the staged path
     set -- "${@//\$DATA/$DATA}"
     echo "command  $*"
     echo
     uv run --no-sync "$@" || status=$?
 else
-    mapfile -t lines < <(grep -v -e '^\s*#' -e '^\s*$' "$parallel")
-    # split the CPUs between the runs, or each torch would start a thread per
-    # CPU and they would fight over them
-    export OMP_NUM_THREADS=$(( SLURM_CPUS_PER_TASK / ${#lines[@]} > 0 ? SLURM_CPUS_PER_TASK / ${#lines[@]} : 1 ))
-    echo "parallel ${#lines[@]} runs from $parallel, $OMP_NUM_THREADS threads each"
-    pids=()
-    for i in "${!lines[@]}"; do
-        echo "run $i    ${lines[$i]}  > $base.$i.out"
-        uv run --no-sync bash -c "${lines[$i]}" > "$base.$i.out" 2>&1 &
-        pids+=($!)
-    done
-    for i in "${!pids[@]}"; do
-        run_status=0
-        wait "${pids[$i]}" || run_status=$?
-        echo
-        echo "run $i    exit $run_status after $((SECONDS - start)) s, ending:"
-        tail -n 3 "$base.$i.out" | sed 's/^/         /'
-        [ "$run_status" -eq 0 ] || status=$run_status
-    done
+    mapfile -t lines < <(grep -v -e '^\s*#' -e '^\s*$' "$file")
+    if [ "$mode" = serial ]; then
+        export FIT2082_GPU_RUNS=1
+        echo "serial   ${#lines[@]} runs from $file"
+        for i in "${!lines[@]}"; do
+            echo "run $i    ${lines[$i]}  > $base.$i.out"
+            run_status=0
+            uv run --no-sync bash -c "${lines[$i]}" > "$base.$i.out" 2>&1 || run_status=$?
+            report "$i" "$run_status"
+            [ "$run_status" -eq 0 ] || status=$run_status
+        done
+    else
+        export FIT2082_GPU_RUNS=${#lines[@]}
+        # split the CPUs between the runs, or each torch would start a thread
+        # per CPU and they would fight over them
+        export OMP_NUM_THREADS=$(( SLURM_CPUS_PER_TASK / ${#lines[@]} > 0 ? SLURM_CPUS_PER_TASK / ${#lines[@]} : 1 ))
+        echo "parallel ${#lines[@]} runs from $file, $OMP_NUM_THREADS threads each"
+        pids=()
+        for i in "${!lines[@]}"; do
+            echo "run $i    ${lines[$i]}  > $base.$i.out"
+            uv run --no-sync bash -c "${lines[$i]}" > "$base.$i.out" 2>&1 &
+            pids+=($!)
+        done
+        for i in "${!pids[@]}"; do
+            run_status=0
+            wait "${pids[$i]}" || run_status=$?
+            report "$i" "$run_status"
+            [ "$run_status" -eq 0 ] || status=$run_status
+        done
+    fi
 fi
 kill "$sampler" 2>/dev/null || true
 
