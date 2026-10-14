@@ -1,0 +1,164 @@
+"""Write the run lists for the whole-pool MONSTER benchmark on M3.
+
+Four HashBoost configurations, fixed from the LenDB and Traffic grids
+(README, `m3`) before any other dataset was run, and whole-pool XGBoost, on 26
+of MONSTER's 29 datasets:
+
+* `default`: 1 round per batch, no frozen window (the reference algorithm)
+* `fast`: 8 rounds per batch, 128-batch window
+* `balanced`: 8 rounds per batch, 512-batch window
+* `accurate`: 16 rounds per batch, 256-batch window
+
+Windows are in batches (an epoch is 239 batches of LenDB and 284 of Traffic,
+so 128, 256 and 512 are about half, one and two epochs there). Both models
+follow the boosted-tree convention, a generous cap with the stopping point
+chosen on the tune slice. HashBoost trains up to 5,000 batches, evaluates
+every 50, and stops once its best tune evaluation is 1,000 batches old.
+XGBoost runs up to 1,000 rounds, in memory on the card, with 50 rounds of
+patience.
+
+Splits: LenDB, Traffic, Pedestrian, Tiselac and InsectSound keep the ones
+every earlier run used. Any other pool large enough uses the same convention
+(validation and tune at rows 65,536-73,728 of the seed-42 shuffle, the rest
+trains). A smaller pool holds out min(4,096, pool / 5) rows each for validation
+and tune and trains on the rest.
+
+Left out: AudioMNIST (48,000-sample series: QUANT's features for three 4,096-row
+holdouts alone would not fit on the card) and S2Agri-17 and S2Agri-34 (59 M
+rows each: the cap reaches a third of an epoch, and XGBoost's ellpack would not
+fit). AudioMNIST-DS and the two 10% S2Agri subsets stand in for them.
+
+    uv run python scripts/m3_runs/monster_benchmark.py   # rewrites monster_*.txt
+
+Each list runs in series, alone on its GPU, so its timings are clean.
+"""
+
+from pathlib import Path
+
+# rows in X and in test fold 0, read from the arrays on M3 on 2026-10-14
+SIZES = {
+    "AudioMNIST-DS": (30000, 6000),
+    "CornellWhaleChallenge": (30000, 6000),
+    "CrowdSourced": (12289, 2833),
+    "DREAMERA": (170246, 29608),
+    "DREAMERV": (170246, 29608),
+    "FordChallenge": (36257, 7254),
+    "FruitFlies": (34518, 6904),
+    "InsectSound": (50000, 10000),
+    "LakeIce": (129280, 25856),
+    "LenDB": (1244942, 261459),
+    "MosquitoSound": (279566, 55914),
+    "Opportunity": (17386, 5202),
+    "PAMAP2": (38856, 9895),
+    "Pedestrian": (189621, 37925),
+    "S2Agri-10pc-17": (5850881, 1189023),
+    "S2Agri-10pc-34": (5850881, 1189023),
+    "STEW": (28512, 7128),
+    "Skoda": (14117, 2827),
+    "TimeSen2Crop": (1135511, 295540),
+    "Tiselac": (99687, 19780),
+    "Traffic": (1460968, 292194),
+    "UCIActivity": (10299, 2401),
+    "USCActivity": (56228, 13168),
+    "WISDM": (17166, 5177),
+    "WISDM2": (149034, 50940),
+    "WhaleSounds": (105163, 21033),
+}
+
+# the splits earlier runs used (stream_full.py's defaults for these)
+EXISTING = {"InsectSound", "LenDB", "Pedestrian", "Tiselac", "Traffic"}
+
+CONFIGS = {
+    "default": "--hashes-per-round 1",
+    "fast": "--hashes-per-round 8 --active-batches 128",
+    "balanced": "--hashes-per-round 8 --active-batches 512",
+    "accurate": "--hashes-per-round 16 --active-batches 256",
+}
+
+BUDGET = "--epochs 100000 --max-batches 5000 --eval-every 50 --patience-batches 1000"
+
+# One list per GPU, balanced by data staged and expected time. Each stages its
+# datasets into the job's /tmp, which counts against --mem.
+JOBS = {
+    "monster_a": ["TimeSen2Crop", "DREAMERA", "DREAMERV"],
+    "monster_b": ["LenDB", "MosquitoSound", "S2Agri-10pc-17", "S2Agri-10pc-34"],
+    "monster_c": [
+        "FruitFlies",
+        "PAMAP2",
+        "WhaleSounds",
+        "Opportunity",
+        "AudioMNIST-DS",
+        "CornellWhaleChallenge",
+        "STEW",
+        "Skoda",
+        "InsectSound",
+    ],
+    "monster_d": [
+        "Traffic",
+        "Pedestrian",
+        "Tiselac",
+        "WISDM2",
+        "LakeIce",
+        "USCActivity",
+        "FordChallenge",
+        "CrowdSourced",
+        "WISDM",
+        "UCIActivity",
+    ],
+}
+
+
+def split_flags(name: str) -> str:
+
+    if name in EXISTING:
+        return ""
+
+    rows, fold = SIZES[name]
+    pool = rows - fold
+
+    if pool >= 65536 + 2 * 4096:
+        return ""
+
+    held = min(4096, pool // 5)
+
+    return f" --n-ref {pool - 2 * held} --n-va {held} --n-te {held}"
+
+
+def lines(name: str) -> list[str]:
+
+    common = (
+        f'python scripts/stream_full.py --path "$DATA" --dataset {name}'
+        f"{split_flags(name)} --out results/monster-benchmark"
+    )
+
+    runs = [
+        f"{common} --model hashboost --compile {BUDGET} {flags} --label {label}"
+        for label, flags in CONFIGS.items()
+    ]
+    runs.append(f"{common} --model xgboost --in-memory --label xgboost")
+
+    return runs
+
+
+def main() -> None:
+
+    here = Path(__file__).parent
+
+    assert sorted(n for names in JOBS.values() for n in names) == sorted(SIZES)
+
+    for job, names in JOBS.items():
+        header = [
+            f"# Generated by monster_benchmark.py: {', '.join(names)}.",
+            "#",
+            f"#     sbatch -c 8 --mem=96G --time=08:00:00 -J {job.replace('_', '-')} \\",
+            f"#         scripts/m3_job.sh --stage {','.join(names)} \\",
+            f"#         --serial scripts/m3_runs/{job}.txt",
+            "",
+        ]
+        body = [line for name in names for line in lines(name)]
+        (here / f"{job}.txt").write_text("\n".join(header + body) + "\n")
+        print(f"{job}: {len(names)} datasets, {len(body)} runs")
+
+
+if __name__ == "__main__":
+    main()
