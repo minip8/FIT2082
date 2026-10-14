@@ -33,6 +33,11 @@ the same dataset, so the curves here are directly comparable to
 the held-out slices are cut at -- `REFERENCE_N_REF` records the ones already
 run, and is what `--n-ref` defaults to.
 
+XGBoost early-stops on the `n_te` slice, the tune rows that `experiment.py`
+holds out as `X_tune`, and reports validation error at the round it stops on
+("tuned"), so nothing is chosen on validation. Whole-pool XGBoost runs before
+this stopped on validation itself.
+
     uv run python scripts/stream_full.py --dataset LenDB --model hashboost --epochs 5
     uv run python scripts/stream_full.py --dataset Traffic --model xgboost \
         --num-boost-round 50
@@ -909,17 +914,22 @@ def run_xgboost(
     }
 
     va = evals_result["va"]["merror"]
+    # validation error at the round the tune slice stopped on
+    tuned = va[booster.best_iteration]
 
     print(
         f"  {len(va)} rounds in {train['wall_s']:.0f}s "
         f"({np.mean(probe.round_s):.1f}s/round)  "
-        f"va_final={va[-1]:.4f} va_best={min(va):.4f} (iter {booster.best_iteration})",
+        f"va_final={va[-1]:.4f} va_best={min(va):.4f} "
+        f"tuned_va={tuned:.4f} (iter {booster.best_iteration})",
         flush=True,
     )
 
     return {
         **entry(evals_result, train),
         "best_iteration": int(booster.best_iteration),
+        "early_stopping": "tune",
+        "tuned": tuned,
     }
 
 
@@ -1125,9 +1135,15 @@ def main() -> None:
         flush=True,
     )
 
-    # the held-out slices are small enough to keep as features on the device
+    # the held-out slices are small enough to keep as features on the device.
+    # xgboost early-stops on the tune slice -- the `n_te` rows after validation,
+    # as in xgboost_baseline.py -- so that nothing is chosen on validation. It
+    # goes last, because early stopping watches the last eval set.
+    held = [("tr", tr[: args.eval_subsample]), ("va", va)]
+    if args.model == "xgboost":
+        held.append(("tune", te))
     holdouts = {}
-    for name, indices in (("tr", tr[: args.eval_subsample]), ("va", va)):
+    for name, indices in held:
         raw, y = stream.gather(indices)
         holdouts[name] = (
             features(raw, transform, device),
@@ -1138,7 +1154,8 @@ def main() -> None:
 
     print(
         f"  holdouts: tr {tuple(holdouts['tr'][0].shape)} (subsample), "
-        f"va {tuple(holdouts['va'][0].shape)}; {num_classes} classes",
+        + "".join(f"{k} {tuple(holdouts[k][0].shape)}, " for k in holdouts if k != "tr")
+        + f"{num_classes} classes",
         flush=True,
     )
 
