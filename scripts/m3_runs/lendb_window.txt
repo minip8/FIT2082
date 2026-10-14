@@ -1,0 +1,15 @@
+# LenDB speed against accuracy: rounds per batch (8, 16) x frozen window (2, 1,
+# 0.5 epochs), whole pool, alone and in series, the same grid as
+# traffic_window.txt. On Traffic a 1-epoch window cost nothing measurable and
+# halved fit_batch. LenDB spends a third of its time in QUANT, which no window
+# shortens, so less is to be saved here. XGBoost: 205 s (with build), 0.0471.
+#
+#     sbatch -c 8 --mem=48G --time=01:00:00 -J lendb-window scripts/m3_job.sh \
+#         --stage LenDB --serial scripts/m3_runs/lendb_window.txt
+
+python scripts/stream_full.py --path "$DATA" --dataset LenDB --model hashboost --epochs 5 --compile --hashes-per-round 8 --active-epochs 2 --label h8_w2 --out results/lendb-window
+python scripts/stream_full.py --path "$DATA" --dataset LenDB --model hashboost --epochs 5 --compile --hashes-per-round 8 --active-epochs 1 --label h8_w1 --out results/lendb-window
+python scripts/stream_full.py --path "$DATA" --dataset LenDB --model hashboost --epochs 5 --compile --hashes-per-round 8 --active-epochs 0.5 --label h8_w0.5 --out results/lendb-window
+python scripts/stream_full.py --path "$DATA" --dataset LenDB --model hashboost --epochs 5 --compile --hashes-per-round 16 --active-epochs 2 --label h16_w2 --out results/lendb-window
+python scripts/stream_full.py --path "$DATA" --dataset LenDB --model hashboost --epochs 5 --compile --hashes-per-round 16 --active-epochs 1 --label h16_w1 --out results/lendb-window
+python scripts/stream_full.py --path "$DATA" --dataset LenDB --model hashboost --epochs 5 --compile --hashes-per-round 16 --active-epochs 0.5 --label h16_w0.5 --out results/lendb-window
