@@ -1,0 +1,11 @@
+# Whole-pool HashBoost's best arms, alone and in series, twice each, so their
+# times can be set against whole-pool XGBoost's (README, `m3`). The capacity
+# batches shared their GPU, which slowed QUANT threefold.
+#
+#     sbatch -c 8 --mem=48G --time=01:30:00 -J hashboost-timing scripts/m3_job.sh \
+#         --stage LenDB,Traffic --serial scripts/m3_runs/hashboost_timing.txt
+
+python scripts/stream_full.py --path "$DATA" --dataset LenDB --model hashboost --epochs 5 --compile --hashes-per-round 16 --active-epochs 2 --label h16_w2_a --out results/hashboost-timing
+python scripts/stream_full.py --path "$DATA" --dataset LenDB --model hashboost --epochs 5 --compile --hashes-per-round 16 --active-epochs 2 --label h16_w2_b --out results/hashboost-timing
+python scripts/stream_full.py --path "$DATA" --dataset Traffic --model hashboost --epochs 10 --compile --hashes-per-round 16 --active-epochs 2 --label h16_w2_a --out results/hashboost-timing
+python scripts/stream_full.py --path "$DATA" --dataset Traffic --model hashboost --epochs 10 --compile --hashes-per-round 16 --active-epochs 2 --label h16_w2_b --out results/hashboost-timing

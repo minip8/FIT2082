@@ -1,0 +1,15 @@
+# Why whole-pool XGBoost on InsectSound read 0.1833 against the benchmark's
+# 0.1907 on the same 32,768 rows at the same settings. Each pipeline twice,
+# which also shows whether XGBoost itself varies between identical runs:
+# xgboost_baseline.py (the benchmark's), stream_full.py in memory, and
+# stream_full.py with its external-memory ellpack.
+#
+#     sbatch -c 8 --mem=32G --time=01:00:00 -J insect-check scripts/m3_job.sh \
+#         --stage InsectSound --serial scripts/m3_runs/insectsound_xgb_check.txt
+
+python scripts/xgboost_baseline.py --path "$DATA" --dataset InsectSound --n-tr 32768 --name baseline_a --out results/insect-check/baseline
+python scripts/xgboost_baseline.py --path "$DATA" --dataset InsectSound --n-tr 32768 --name baseline_b --out results/insect-check/baseline
+python scripts/stream_full.py --path "$DATA" --dataset InsectSound --model xgboost --in-memory --label stream_mem_a --out results/insect-check/stream
+python scripts/stream_full.py --path "$DATA" --dataset InsectSound --model xgboost --in-memory --label stream_mem_b --out results/insect-check/stream
+python scripts/stream_full.py --path "$DATA" --dataset InsectSound --model xgboost --cache-dir "$DATA/xgb-cache" --label stream_ext_a --out results/insect-check/stream
+python scripts/stream_full.py --path "$DATA" --dataset InsectSound --model xgboost --cache-dir "$DATA/xgb-cache" --label stream_ext_b --out results/insect-check/stream
