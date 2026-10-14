@@ -18,7 +18,8 @@ Hardware budget: one 8 GB RTX 4060 and 7.9 GB host RAM. Memory usage shapes a lo
 of the design (chunking, streaming, page-cache eviction).
 
 Larger runs can go to Monash's M3 cluster. **Read `M3.md` before touching M3**:
-Claude stays local and only sends light commands to the login node over SSH, asks
+Claude stays local and only sends light commands to the login node over SSH (never
+downloads: `uv sync`, clones and dataset fetches go to an `M3_IDE` job), asks
 before its first `ssh`/`rsync`/`sbatch`, never polls the queue faster than once a
 minute, and never leaves a reserved GPU idle (admins cancel such jobs).
 
