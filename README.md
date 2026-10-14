@@ -293,6 +293,73 @@ The four jobs took 1.7-4.0 h, with the GPU 85-97% busy.
   epochs with a floor in batches would cut this without touching the large
   pools.
 
+**Lever screen, round 1** (`3604846`, jobs 61018884-61018889, four L40S, each
+alone and in series; `scripts/m3_runs/levers.py`). Each lever from the
+benchmark discussion is one change from `fast` (8 bits, 8 rounds per batch,
+128-batch window, the benchmark's budget and tune stopping), with `base` rerun
+in the same job. Every arm uses the new feature cache (`63eb343`), which keeps
+a pool's QUANT features on the card after epoch 1 when they fit and changes
+only the time. Val error at the tune-chosen point, one run each, best of each
+row bold:
+
+| dataset | `base` | `l2_1` | `l2_10` | `l2_100` | `sampled` | `bits6` | `lr05` | `win2` | `win8` | `gain4` | `gain16` | `gain64` | `combo` | XGBoost |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| CrowdSourced | 0.0418 | 0.0354 | 0.0338 | 0.0243 | 0.0370 | 0.0238 | 0.0402 | 0.0434 | 0.0402 | 0.0169 | 0.0069 | **0.0063** | 0.0074 | 0.0079 |
+| DREAMERA | 0.1277 | 0.1218 | 0.1309 | 0.1233 | 0.1318 | 0.1279 | 0.1226 | 0.2668 | 0.1443 | 0.1340 | 0.1372 | 0.1450 | 0.1401 | **0.0818** |
+| FordChallenge | 0.1047 | 0.1023 | 0.0991 | 0.0959 | 0.0959 | 0.0957 | 0.1077 | 0.1152 | 0.1079 | 0.0903 | 0.0730 | 0.0620 | 0.0691 | **0.0459** |
+| InsectSound | 0.2290 | 0.2087 | 0.2090 | 0.2063 | 0.2222 | 0.2139 | 0.2136 | 0.2444 | 0.2271 | 0.2109 | 0.2068 | 0.1953 | 0.1975 | **0.1833** |
+| LenDB | 0.0474 | **0.0403** | 0.0432 |  | 0.0466 |  | 0.0449 |  |  | 0.0498 | 0.0464 |  | 0.0439 | 0.0471 |
+| PAMAP2 | 0.0461 | 0.0420 | 0.0381 | 0.0308 | 0.0347 | 0.0295 | 0.0447 | 0.0391 | 0.0452 | 0.0127 | 0.0076 | **0.0046** | 0.0066 | 0.0083 |
+| STEW | 0.0872 | 0.0823 | 0.0808 | 0.0735 | 0.0850 | 0.0654 | 0.0862 | 0.0876 | 0.0876 | 0.0615 | 0.0469 | 0.0378 | 0.0396 | **0.0242** |
+| Traffic | 0.2957 | **0.2856** | 0.2913 |  | 0.2944 |  | 0.2969 |  |  | 0.3020 | 0.3083 |  | 0.2986 | 0.3330 |
+| UCIActivity | 0.0475 | 0.0418 | 0.0437 | 0.0380 | 0.0374 | 0.0431 | 0.0431 | 0.0437 | 0.0443 | 0.0272 | 0.0133 | **0.0120** | 0.0139 | 0.0203 |
+| WISDM | 0.0346 | 0.0317 | 0.0267 | 0.0221 | 0.0338 | 0.0204 | 0.0330 | 0.0363 | 0.0317 | 0.0167 | 0.0134 | 0.0117 | **0.0113** | 0.0134 |
+
+`l2_*` is leaf L2 (`--hessian-eps`), `sampled` sampled hard pairs, `win*` a
+frozen window of 2 or 8 batches, `gain*` GainSplitter with 4, 16 or 64
+candidates per bit, and `combo` gain16 + L2 1 + sampled. Traffic and LenDB ran
+a subset of arms.
+
+* **Gain-scored splits are the lever.** On the six small pools error falls
+  monotonically with the candidates, 1.7- to tenfold at 64 (PAMAP2 0.0461 to
+  0.0046). HashBoost now beats XGBoost on PAMAP2, CrowdSourced, UCIActivity and
+  WISDM, and the gap on STEW, FordChallenge and InsectSound shrinks to
+  0.01-0.016. These gaps are far beyond any noise floor seen so far. Random
+  feature choice was the problem on these pools, as suspected.
+* **But gain overfits the large pools.** On Traffic gain16 fits training to
+  0.003 (base 0.067) and validates 0.013 worse; on DREAMERA every gain arm is
+  worse, by up to 0.017. Each split is the best of up to 512 candidates on one
+  4,096-row batch, so it can fit that batch's noise.
+* **Leaf L2 helps almost everywhere.** On small pools more is better (100 cut
+  CrowdSourced from 0.042 to 0.024); on the large ones 1 is best: LenDB 0.0403,
+  the best LenDB result yet and 0.007 ahead of XGBoost, and Traffic 0.2856.
+  `bits6` helps small pools about as much as `l2_100`, the same lesson: fewer
+  rows per cell need more shrinkage.
+* **Short windows do not regularise.** `win8` is level or worse and `win2`
+  worse everywhere, catastrophically on DREAMERA (0.267). Freezing is a speed
+  lever only.
+* `sampled` and `lr05` are small and mixed. The `round_class` readout, refit on
+  `base`'s final model, never improved on its warm start (+0.0000 on seven
+  pools, -0.001 on two), so it is dropped.
+
+Time (train wall, batches trained in brackets). The feature cache cut
+small-pool time 2-7x at the same budget; LenDB's features (113 s of QUANT) did
+not fit and were recomputed. Gain costs about 2.5x per batch but stops sooner
+on small pools:
+
+| dataset | `fast`, benchmark | `base`, cached | `gain64` (`gain16` on the large) |
+| --- | ---: | ---: | ---: |
+| CrowdSourced | 150s (2950) | 35s (3700) | 30s (1050) |
+| DREAMERA | 356s (5000) | 52s (5000) | 141s (4550) |
+| FordChallenge | 85s (2850) | 39s (4550) | 36s (1250) |
+| InsectSound | 28s (1250) | 15s (1250) | 75s (1200) |
+| PAMAP2 | 324s (2700) | 49s (2900) | 136s (2000) |
+| STEW | 197s (3250) | 38s (4050) | 50s (1700) |
+| UCIActivity | 44s (2050) | 21s (2300) | 63s (1800) |
+| WISDM | 29s (1900) | 17s (1550) | 45s (1100) |
+| LenDB | 152s (3900) | 164s (4150) | 128s (2450) |
+| Traffic | 64s (4550) | 57s (5000) | 126s (5000) |
+
 ### benchmark
 
 This branch compares HashBoost against XGBoost on the five MONSTER datasets
