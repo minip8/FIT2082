@@ -70,6 +70,7 @@ import time
 from collections import deque
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from itertools import chain
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -78,7 +79,13 @@ import torch
 import xgboost as xgb
 import xgboost.callback
 
-from fit2082.boost import BaggedHashBoost, HashBoost
+from fit2082.boost import (
+    BaggedHashBoost,
+    GainSplitter,
+    HardPairSplitter,
+    HashBoost,
+    fit_readout,
+)
 from fit2082.cli import parse_args
 from fit2082.pulsar.pulsar import Pulsar
 from fit2082.quant.quant import Quant
@@ -247,11 +254,7 @@ class RawStream:
         frozen-round cache needs to recognise a row it has seen before.
         """
 
-        order = self._rng.permutation(self.indices) if self.shuffle else self.indices
-
-        for i, start in enumerate(range(0, order.shape[0], self.batch_size)):
-            batch = np.sort(order[start : start + self.batch_size])
-
+        for i, batch in enumerate(self.batch_rows()):
             yield (
                 np.array(self._X[batch], dtype=np.float32),
                 np.array(self._Y[batch]),
@@ -260,6 +263,19 @@ class RawStream:
 
             if self.drop_cache_every and (i + 1) % self.drop_cache_every == 0:
                 self.unmap()
+
+    def batch_rows(self) -> Iterator[np.ndarray]:
+        """One epoch's batches as sorted row ids, drawing the epoch's shuffle.
+
+        `with_rows` reads these. A run that already holds every row's features
+        (`FeatureCache`) walks them without reading, and since both draw from
+        the same generator, its batches are the ones a reading run would get.
+        """
+
+        order = self._rng.permutation(self.indices) if self.shuffle else self.indices
+
+        for start in range(0, order.shape[0], self.batch_size):
+            yield np.sort(order[start : start + self.batch_size])
 
     def epochs(self, count: int) -> Iterator[RawBatch]:
         """`with_rows` for `count` epochs back to back, each with its own shuffle."""
@@ -439,6 +455,48 @@ def features(raw: np.ndarray, transform: Transform, device: str) -> torch.Tensor
 # == hashboost =================================================================
 
 
+class FeatureCache:
+    """Every training row's features and label, kept on the device after epoch 1.
+
+    A streamed run recomputes QUANT for every batch of every epoch. On a large
+    pool that is a few epochs and a fraction of the time, but a small pool runs
+    hundreds of epochs inside the batch budget: QUANT was 1,117 s of
+    Opportunity's 1,254 s (7,312 rows, 117,746 features). When the pool's
+    features fit in `budget_bytes`, the first epoch stores each row's and later
+    epochs gather them, reading nothing. The batches are the same rows in the
+    same order, and QUANT is deterministic, so the model trains on exactly what
+    an uncached run would.
+    """
+
+    @staticmethod
+    def nbytes(indices: np.ndarray, num_features: int) -> int:
+
+        return indices.shape[0] * num_features * 4
+
+    def __init__(self, indices: np.ndarray, num_features: int, device: str) -> None:
+
+        # row id -> slot, on the host, as the ids come
+        self._slot = np.full(int(indices.max()) + 1, -1, dtype=np.int64)
+        self._slot[indices] = np.arange(indices.shape[0])
+
+        self.Z = torch.empty(
+            (indices.shape[0], num_features), dtype=torch.float32, device=device
+        )
+        self.Y = torch.empty(indices.shape[0], dtype=torch.int64, device=device)
+
+    def store(self, rows: np.ndarray, Z: torch.Tensor, Y: torch.Tensor) -> None:
+
+        slots = torch.as_tensor(self._slot[rows], device=Z.device)
+        self.Z[slots] = Z
+        self.Y[slots] = Y
+
+    def recall(self, rows: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
+
+        slots = torch.as_tensor(self._slot[rows], device=self.Z.device)
+
+        return self.Z[slots], self.Y[slots]
+
+
 def run_hashboost(
     stream: RawStream,
     transform: Transform,
@@ -482,7 +540,17 @@ def run_hashboost(
         "shrinkage_tau": args.shrinkage_tau,
         "active_rounds": active_rounds,
         "compile": args.compile,
+        "hessian_eps": args.hessian_eps,
     }
+
+    # The split chooser: hard pairs, strict or sampled, and optionally the best
+    # of several of them per bit by gain. A splitter object would not fit in
+    # the results' params, so they record its repr.
+    splitter = HardPairSplitter(sample=args.sample_pairs)
+    if args.gain_candidates:
+        splitter = GainSplitter(
+            candidates=args.gain_candidates, lam=args.gain_lambda, base=splitter
+        )
 
     params = {
         **kwargs,
@@ -493,6 +561,9 @@ def run_hashboost(
         "max_batches": args.max_batches,
         "patience_batches": args.patience_batches,
         "prefetch": args.prefetch,
+        "splitter": repr(splitter),
+        "feature_cache_gb": args.feature_cache_gb,
+        "readout": args.readout,
     }
 
     torch.manual_seed(args.seed)
@@ -500,10 +571,23 @@ def run_hashboost(
     # Bagging shares the stream: each batch is read and transformed once and
     # handed to every estimator, so the I/O is not paid E times over.
     model: HashBoost | BaggedHashBoost = (
-        HashBoost(**kwargs, device=device)
+        HashBoost(**kwargs, splitter=splitter, device=device)
         if args.estimators == 1
         else BaggedHashBoost(num_estimators=args.estimators, **kwargs, device=device)
     )
+
+    cache: FeatureCache | None = None
+    if args.feature_cache_gb:
+        num_features = holdouts["va"][0].shape[1]
+        nbytes = FeatureCache.nbytes(stream.indices, num_features)
+        fits = nbytes <= args.feature_cache_gb * 1e9
+        print(
+            f"  feature cache: {nbytes / 1e9:.1f} GB, "
+            + ("on the device after epoch 1" if fits else "does not fit, off"),
+            flush=True,
+        )
+        if fits:
+            cache = FeatureCache(stream.indices, num_features, device)
 
     print(
         f"  {len(stream)} batches/epoch, up to {total_rounds} rounds"
@@ -515,7 +599,15 @@ def run_hashboost(
     # With a background reader, reading no longer adds to the wall time by
     # itself. `batches.busy_s` is the time spent reading, and `read_wait_s` is
     # the part of it the training loop sat waiting for; serially they are equal.
-    batches = Prefetch(stream.epochs(args.epochs), depth=args.prefetch)
+    batches = Prefetch(stream.epochs(1 if cache else args.epochs), depth=args.prefetch)
+
+    def from_cache() -> Iterator[
+        tuple[np.ndarray | None, np.ndarray | None, np.ndarray]
+    ]:
+        # epochs 2 on, read from the cache: no series, only the rows
+        for _ in range(args.epochs - 1):
+            for rows in stream.batch_rows():
+                yield None, None, rows
 
     records: dict[str, list[tuple[int, float]]] = {name: [] for name in holdouts}
     peak_mb = gpu_used_mb(device)
@@ -574,7 +666,7 @@ def run_hashboost(
 
     # `for batch in batches` would fold the wait for a batch into the loop
     # machinery, where it cannot be timed. Pull each batch explicitly instead.
-    pending = iter(batches)
+    pending = iter(batches) if cache is None else chain(batches, from_cache())
 
     while True:
         mark = time.perf_counter()
@@ -587,8 +679,14 @@ def run_hashboost(
         raw, y, rows = batch
 
         mark = time.perf_counter()
-        Z = features(raw, transform, device)
-        Y = torch.as_tensor(y.astype(np.int64), device=device)
+        if raw is None or y is None:
+            assert cache is not None
+            Z, Y = cache.recall(rows)
+        else:
+            Z = features(raw, transform, device)
+            Y = torch.as_tensor(y.astype(np.int64), device=device)
+            if cache is not None:
+                cache.store(rows, Z, Y)
         synchronise()
         transform_s += time.perf_counter() - mark
 
@@ -678,11 +776,63 @@ def run_hashboost(
         flush=True,
     )
 
-    return {
+    result = {
         **entry(elapsed),
         "early_stopping": "tune",
         "tuned": tuned,
         "best_round": best_round,
+    }
+
+    if args.readout:
+        result["readout"] = readout(model, cache, holdouts, args)
+
+    return result
+
+
+def readout(
+    model: HashBoost | BaggedHashBoost,
+    cache: FeatureCache | None,
+    holdouts: dict[str, tuple[torch.Tensor, torch.Tensor]],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    """Refit the finished model's leaf tables jointly (`fit2082.boost.readout`).
+
+    It trains on the whole pool, so it needs the feature cache, and stops on
+    the tune slice as boosting does. The model it refits is the final one, not
+    the tune-chosen round, so its validation error is quoted beside `tuned`
+    rather than in place of it.
+    """
+
+    if cache is None:
+        raise SystemExit("--readout needs the feature cache (--feature-cache-gb)")
+
+    mark = time.perf_counter()
+    fitted, info = fit_readout(
+        model,
+        cache.Z,
+        cache.Y,
+        *holdouts["tune"],
+        rung=args.readout,
+        steps=args.readout_steps,
+    )
+    X_va, Y_va = holdouts["va"]
+
+    with torch.no_grad():
+        va = (fitted.predict(X_va).argmax(-1) != Y_va).to(torch.float32).mean().item()
+        final = (model.predict(X_va).argmax(-1) != Y_va).to(torch.float32).mean().item()
+
+    print(
+        f"  readout {args.readout}: va {final:.4f} -> {va:.4f} "
+        f"(tune {info['tune_warm_start']:.4f} -> {info['tune_best']:.4f}) "
+        f"in {time.perf_counter() - mark:.0f}s",
+        flush=True,
+    )
+
+    return {
+        **{k: v for k, v in info.items() if k != "history"},
+        "va_before": final,
+        "va": va,
+        "wall_s": time.perf_counter() - mark,
     }
 
 
@@ -1085,6 +1235,45 @@ def main() -> None:
         default=0.0,
         help="mass-adaptive leaf smoothing; scale with rows x epochs / 2**num_bits",
     )
+    parser.add_argument(
+        "--hessian-eps",
+        type=float,
+        default=1e-6,
+        help="added to every leaf's hessian sum: XGBoost's reg_lambda, which "
+        "pulls sparse leaves toward zero (the default only guards the division)",
+    )
+    parser.add_argument(
+        "--sample-pairs",
+        action="store_true",
+        help="draw the hard pairs in proportion to cross entropy, not hardest first",
+    )
+    parser.add_argument(
+        "--gain-candidates",
+        type=int,
+        default=0,
+        help="each bit takes the best of this many hard-pair splits by gain "
+        "(GainSplitter; 0 = the hard-pair splits as drawn)",
+    )
+    parser.add_argument(
+        "--gain-lambda",
+        type=float,
+        default=1.0,
+        help="the hessian regulariser in GainSplitter's gain",
+    )
+    parser.add_argument(
+        "--feature-cache-gb",
+        type=float,
+        default=0.0,
+        help="keep the pool's features on the device after epoch 1 when they "
+        "fit in this many GB, instead of recomputing QUANT (0 = off)",
+    )
+    parser.add_argument(
+        "--readout",
+        default="",
+        choices=["", "round", "round_class", "table"],
+        help="refit the finished model's leaf tables (needs the feature cache)",
+    )
+    parser.add_argument("--readout-steps", type=int, default=300)
     parser.add_argument(
         "--active-epochs",
         type=float,

@@ -7,12 +7,13 @@ from fit2082.boost.partition import (
     Partitioner,
 )
 from fit2082.boost.readout import Readout, fit_readout
-from fit2082.boost.splits import HardPairSplitter, Splitter
+from fit2082.boost.splits import GainSplitter, HardPairSplitter, Splitter
 from fit2082.boost.tables import HashTables
 
 __all__ = [
     "AxisAlignedPartitioner",
     "BaggedHashBoost",
+    "GainSplitter",
     "HardPairSplitter",
     "HashBoost",
     "HashTables",

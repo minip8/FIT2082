@@ -256,3 +256,112 @@ class HardPairSplitter:
     def __repr__(self) -> str:
 
         return f"HardPairSplitter(sample={self.sample})"
+
+
+# == best of several hard pairs, by gain =======================================
+
+
+class GainSplitter:
+    """Each bit is the best of `candidates` hard-pair splits, scored by gain.
+
+    `HardPairSplitter` picks every bit's feature at random, so nothing checks
+    that a bit separates anything; XGBoost scores every feature at every bin
+    edge instead. This sits between them. It draws `candidates x num_bits`
+    hard-pair splits and fills the bits one at a time, CatBoost's way of growing
+    an oblivious tree: each takes the unused candidate whose split, within the
+    cells the earlier bits have made, scores highest by
+
+        sum over cells and classes of G**2 / (H + lam)
+
+    (XGBoost's gain less a parent term, which is the same for every candidate
+    at a given bit). A round is still `num_bits` global predicates indexing one
+    flat table, so encoding, the tables, freezing and the code cache are
+    untouched; only which predicates get picked changes. With `candidates=1`
+    it picks the hard-pair splits the base splitter would have, in another
+    order. Everything stays on the device: the argmax is never read back.
+    """
+
+    def __init__(
+        self,
+        candidates: int = 16,
+        lam: float = 1.0,
+        base: Splitter | None = None,
+        generator: torch.Generator | None = None,
+        chunk_bytes: int = 256 << 20,
+    ) -> None:
+
+        if candidates < 1:
+            raise ValueError(f"candidates must be at least 1, got {candidates}")
+
+        self.candidates = candidates
+        self.lam = lam
+        self.base = base or HardPairSplitter(generator=generator)
+        self.chunk_bytes = chunk_bytes
+
+    def propose(
+        self,
+        X: torch.Tensor,
+        Y: torch.Tensor,
+        probabilities: torch.Tensor,
+        gradient: torch.Tensor,
+        hessian: torch.Tensor,
+        num_bits: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+
+        features, midpoints = self.base.propose(
+            X, Y, probabilities, gradient, hessian, num_bits * self.candidates
+        )
+
+        n, k = gradient.shape
+        c = features.shape[0]
+
+        # (n, c): which side of each candidate's split every row falls on
+        left = (X[:, features] <= midpoints).to(torch.int64)
+        stats = torch.cat([gradient, hessian], 1)
+
+        cell = torch.zeros(n, dtype=torch.int64, device=X.device)
+        used = torch.zeros(c, dtype=torch.bool, device=X.device)
+        picks = []
+
+        # candidates per scatter, so the expanded (n, chunk, 2k) stats stay
+        # within `chunk_bytes` even at 82 classes
+        chunk = max(1, self.chunk_bytes // (n * 2 * k * 4))
+
+        for level in range(num_bits):
+            cells = 2 ** (level + 1)
+            score = torch.empty(c, device=X.device)
+
+            for a in range(0, c, chunk):
+                b = min(a + chunk, c)
+                child = cell[:, None] * 2 + left[:, a:b]
+                flat = child + torch.arange(b - a, device=X.device) * cells
+
+                sums = torch.zeros(
+                    ((b - a) * cells, 2 * k), dtype=stats.dtype, device=X.device
+                )
+                sums.index_add_(
+                    0,
+                    flat.reshape(-1),
+                    stats[:, None, :].expand(n, b - a, 2 * k).reshape(-1, 2 * k),
+                )
+                sums = sums.view(b - a, cells, 2 * k)
+
+                score[a:b] = (sums[..., :k].square() / (sums[..., k:] + self.lam)).sum(
+                    (1, 2)
+                )
+
+            best = score.masked_fill(used, -torch.inf).argmax()
+            used[best] = True
+            picks.append(best)
+            cell = cell * 2 + left[:, best]
+
+        chosen = torch.stack(picks)
+
+        return features[chosen], midpoints[chosen]
+
+    def __repr__(self) -> str:
+
+        return (
+            f"GainSplitter(candidates={self.candidates}, lam={self.lam}, "
+            f"base={self.base!r})"
+        )
