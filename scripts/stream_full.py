@@ -653,6 +653,10 @@ class StreamedFeatures(xgb.DataIter):
     LenDB's full pool bins to roughly 40 GB, which fits neither the 8 GB card
     nor the 7.9 GB of host RAM. A dataset whose ellpack would fit is written to
     disk all the same -- external memory is the thing being measured.
+
+    `in_memory=True` drops the cache prefix, so that the same batches can build
+    an ordinary `QuantileDMatrix` that stays on the device. On an M3 L40S (46 GB)
+    LenDB's 14.6 GB ellpack fits, and paging it cost 27.4 s a round.
     """
 
     def __init__(
@@ -662,6 +666,7 @@ class StreamedFeatures(xgb.DataIter):
         device: str,
         cache_prefix: str,
         drop_cache_every: int = 20,
+        in_memory: bool = False,
     ) -> None:
 
         self._stream = stream
@@ -673,7 +678,12 @@ class StreamedFeatures(xgb.DataIter):
         self._it: Iterator[tuple[np.ndarray, np.ndarray]] | None = None
         self.passes = 0
 
-        super().__init__(cache_prefix=cache_prefix, release_data=True, on_host=False)
+        if in_memory:
+            super().__init__(release_data=True)
+        else:
+            super().__init__(
+                cache_prefix=cache_prefix, release_data=True, on_host=False
+            )
 
     def reset(self) -> None:
 
@@ -815,10 +825,14 @@ def run_xgboost(
         device,
         str(cache / args.dataset.lower()),
         drop_cache_every=args.drop_cache_every,
+        in_memory=args.in_memory,
     )
-    dtrain = xgb.ExtMemQuantileDMatrix(
-        it, max_bin=args.max_bin, cache_host_ratio=args.cache_host_ratio
-    )
+    if args.in_memory:
+        dtrain = xgb.QuantileDMatrix(it, max_bin=args.max_bin)
+    else:
+        dtrain = xgb.ExtMemQuantileDMatrix(
+            it, max_bin=args.max_bin, cache_host_ratio=args.cache_host_ratio
+        )
 
     # the held-out slices are small enough to bin in one go; ref=dtrain reuses
     # the training cuts so they do not sketch their own
@@ -857,12 +871,12 @@ def run_xgboost(
                 "device_total_mb": gpu_total_mb(device),
                 "host_peak_rss_mb": host_peak_rss_mb(),
                 "streamed": True,
-                "external_memory": True,
+                "external_memory": not args.in_memory,
                 "cache_gb": cache_bytes / 1e9,
                 "build_passes": it.passes,
                 "cuda_async_pool": args.cuda_async_pool,
                 "batch_size": stream.batch_size,
-                "resident": "paged from disk",
+                "resident": "on the device" if args.in_memory else "paged from disk",
             },
             "n_tr": int(stream.indices.shape[0]),
             "seconds_per_round": float(np.mean(probe.round_s))
@@ -1040,6 +1054,13 @@ def main() -> None:
         default=None,
         help="where xgboost writes its ellpack pages "
         "(default: /tmp/xgb-extmem/<dataset>)",
+    )
+    parser.add_argument(
+        "--in-memory",
+        action="store_true",
+        help="build an ordinary QuantileDMatrix that stays on the device instead "
+        "of paging an external-memory ellpack every round (needs the ellpack, "
+        "about one byte per row x feature, to fit on the card)",
     )
     parser.add_argument(
         "--random-access",
