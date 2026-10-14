@@ -1,0 +1,10 @@
+# Follow-up to insectsound_xgb_check.txt: both pipelines were deterministic
+# (0.1907 and 0.1833, twice each) on the same rows at the same settings. Here
+# each sees all 32,768 training rows as one batch. If they now agree, the gap
+# came from the training batches XGBoost's quantile sketch was built over.
+#
+#     sbatch -c 8 --mem=32G --time=00:30:00 -J insect-onebatch scripts/m3_job.sh \
+#         --stage InsectSound --serial scripts/m3_runs/insectsound_xgb_onebatch.txt
+
+python scripts/xgboost_baseline.py --path "$DATA" --dataset InsectSound --n-tr 32768 --iter-batch-size 32768 --name baseline_onebatch --out results/insect-check/onebatch-baseline
+python scripts/stream_full.py --path "$DATA" --dataset InsectSound --model xgboost --in-memory --batch-size 32768 --label stream_onebatch --out results/insect-check/onebatch-stream
