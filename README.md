@@ -139,6 +139,35 @@ since that is where its QUANT pass runs:
 * Isolated, the LenDB arm trains in about half its shared time (177 s). Timings
   of the two reruns agree within 10%.
 
+**Traffic: rounds per batch x frozen window** (`25f664d`, job 61010012, one
+L40S, alone and in series, whole pool, 10 epochs;
+`scripts/m3_runs/traffic_window.txt`). The window is `--active-epochs`, and
+the rounds still updated per batch are window x 284 batches x rounds per
+batch. One run each, with errors as the mean of the last seven evaluations.
+`h16_w2` repeats the isolated runs above, which read 0.2864 twice, so 16
+rounds per batch carries about 0.005 of run-to-run spread:
+
+| arm | rounds updated per batch | train | `fit_batch` | val error | train error |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `h8_w2` | 4,544 | 100s | 89s | 0.3022 | 0.1247 |
+| `h8_w1` | 2,272 | 62s | 51s | 0.3032 | 0.1250 |
+| `h8_w0.5` | 1,136 | **44s** | 32s | 0.3101 | 0.1354 |
+| `h16_w2` | 9,088 | 323s | 309s | 0.2915 | 0.0777 |
+| `h16_w1` | 4,544 | 186s | 172s | **0.2855** | 0.0748 |
+| `h16_w0.5` | 2,272 | 111s | 97s | 0.2961 | 0.0810 |
+| XGBoost, whole pool | | 51s (with build) | | 0.3330 | 0.2991 |
+
+* **`fit_batch` is linear in the window:** halving it halves `fit_batch`, at
+  both widths.
+* **A 1-epoch window costs nothing measurable.** `h8_w1` is within 0.001 of
+  `h8_w2`, and `h16_w1` is the best arm here, inside the 16-round spread.
+  Half an epoch costs about 0.005-0.008, and training error rises with it.
+* **HashBoost now beats XGBoost on both counts on Traffic.** `h8_w0.5` trains
+  in 44 s against XGBoost's 51 s and is 0.023 ahead. `h8_w1` takes 62 s for
+  0.030 ahead, and `h16_w1` takes 186 s for 0.048 ahead. XGBoost's own floor
+  from the sketch batching (InsectSound, above) is about 0.006, so every one of
+  these gaps clears it.
+
 ### benchmark
 
 This branch compares HashBoost against XGBoost on the five MONSTER datasets
