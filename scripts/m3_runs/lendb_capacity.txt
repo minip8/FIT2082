@@ -1,0 +1,10 @@
+# LenDB whole-pool HashBoost: control against 8 and 16 rounds per batch, one
+# L40S between them (README "More rounds per pass" ran the first two on the
+# laptop). Submit with the data staged:
+#
+#     sbatch -c 12 --mem=48G -J lendb-capacity scripts/m3_job.sh --stage LenDB \
+#         --parallel scripts/m3_runs/lendb_capacity.txt
+
+python scripts/stream_full.py --path "$DATA" --dataset LenDB --model hashboost --epochs 5 --compile --label control --out results/lendb-capacity/control
+python scripts/stream_full.py --path "$DATA" --dataset LenDB --model hashboost --epochs 5 --compile --hashes-per-round 8 --active-epochs 2 --label h8_w2 --out results/lendb-capacity/h8_w2
+python scripts/stream_full.py --path "$DATA" --dataset LenDB --model hashboost --epochs 5 --compile --hashes-per-round 16 --active-epochs 2 --label h16_w2 --out results/lendb-capacity/h16_w2

@@ -1,10 +1,10 @@
 #!/bin/bash
-# Run one command from this repo as a Slurm job on Monash's M3 (see M3.md).
+# Run commands from this repo as a Slurm job on Monash's M3 (see M3.md).
 #
-# Submit from the repo root on M3. Everything after the script name is the
-# command, run under `uv run --no-sync` so that a job never downloads (the venv
-# is synced on purpose, in a CPU job; see M3.md). `sbatch` flags placed before
-# the script override the defaults below:
+# Submit from the repo root on M3. Everything after the script name (and its
+# own options) is the command, run under `uv run --no-sync` so that a job
+# never downloads (the venv is synced on purpose, in a CPU job; see M3.md).
+# `sbatch` flags placed before the script override the defaults below:
 #
 #     sbatch scripts/m3_job.sh python -m fit2082.boost.experiment \
 #         --dataset Pedestrian --seeds 1 --compile --variants baseline
@@ -12,11 +12,25 @@
 #         python scripts/stream_full.py --dataset LenDB --model hashboost --epochs 5
 #     sbatch --gres=gpu:A100:1 scripts/m3_job.sh python scripts/ucr_benchmark.py --compile
 #
-# The defaults name an L40S. A bare `--gres=gpu:1` landed on a T4 in the smoke
-# test, which trained Pedestrian's baseline in 32.5 s against 8-14 s on the
-# local RTX 4060. A job prints its node, GPU, commit and command first, and
-# its GPU utilisation last. M3 cancels jobs that hold an idle GPU, and its own
-# `jobstats` crashed on our jobs, so the log carries the evidence instead.
+# Options, before the command:
+#
+#   --stage A,B      copy data/A and data/B to the job's node-local /tmp first
+#                    and export its path as $DATA. Reading LenDB's series off
+#                    Lustre left the GPU waiting 36 s of a 79 s stream. The copy
+#                    stays in the page cache, so it counts against --mem. Write
+#                    '$DATA' in single quotes so it reaches the job unexpanded:
+#                    ... --stage LenDB python scripts/stream_full.py --path '$DATA'
+#   --parallel FILE  run each line of FILE (blank lines and # comments skipped)
+#                    as its own process on the one GPU, with bash expanding
+#                    $DATA. One LenDB stream used 2 GB of the L40S's 46 GB and
+#                    kept it 25% busy, so several arms fill each other's stalls.
+#                    Give each line its own --out: the processes write at once.
+#
+# The defaults name an L40S, which beat an A100 on every stage of the LenDB
+# stream and waited a fifth as long to start (M3.md). A job prints its node,
+# GPU, commit and command(s) first, and its GPU utilisation last. M3 cancels
+# jobs that hold an idle GPU, and its own `jobstats` crashed on our jobs, so the
+# log carries the evidence instead.
 #
 #SBATCH --job-name=fit2082
 #SBATCH --partition=gpu
@@ -30,8 +44,18 @@
 
 set -euo pipefail
 
-if [ $# -eq 0 ]; then
-    echo "usage: sbatch [sbatch flags] scripts/m3_job.sh <command> [args...]" >&2
+usage="usage: sbatch [sbatch flags] scripts/m3_job.sh [--stage A,B] (--parallel FILE | <command> [args...])"
+stage=""
+parallel=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --stage) stage=$2; shift 2 ;;
+        --parallel) parallel=$2; shift 2 ;;
+        *) break ;;
+    esac
+done
+if [ -z "$parallel" ] && [ $# -eq 0 ]; then
+    echo "$usage" >&2
     exit 2
 fi
 
@@ -43,26 +67,67 @@ source ~/.bashrc.d/fit2082.sh
 # that every new job starts without.
 export TORCHINDUCTOR_CACHE_DIR=/scratch2/jt76/myan0101/torchinductor
 cd "$SLURM_SUBMIT_DIR"
+logs=/scratch2/jt76/myan0101/logs
+base="$logs/${SLURM_JOB_NAME}-${SLURM_JOB_ID}"
 
 # == header ====================================================================
 
 echo "job      $SLURM_JOB_ID ($SLURM_JOB_NAME) on $(hostname), $(date '+%F %T')"
 echo "gpu      $(nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader)"
 echo "commit   $(git rev-parse --short HEAD)$(git diff --quiet HEAD -- || echo ' (dirty)')"
-echo "command  $*"
-echo
+
+# == staging ===================================================================
+
+export DATA=data
+if [ -n "$stage" ]; then
+    # Slurm gives each job its own /tmp and deletes it when the job ends; the
+    # trap covers a run outside such a job.
+    DATA="/tmp/fit2082-$SLURM_JOB_ID"
+    trap 'rm -rf "$DATA"' EXIT
+    mkdir -p "$DATA"
+    t0=$SECONDS
+    for name in ${stage//,/ }; do
+        cp -rL "data/$name" "$DATA/"
+    done
+    echo "staged   $stage to $DATA ($(du -sh "$DATA" | cut -f1) in $((SECONDS - t0)) s)"
+fi
 
 # == run =======================================================================
 
-# Sample GPU utilisation every 10 s for the summary below.
-gpu_log="/scratch2/jt76/myan0101/logs/${SLURM_JOB_NAME}-${SLURM_JOB_ID}.gpu.csv"
+# Sample GPU utilisation every 2 s for the summary below.
 nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader,nounits \
-    -l 10 > "$gpu_log" &
+    -l 2 > "$base.gpu.csv" &
 sampler=$!
 
 start=$SECONDS
 status=0
-uv run --no-sync "$@" || status=$?
+if [ -z "$parallel" ]; then
+    # a literal $DATA in the arguments becomes the staged path
+    set -- "${@//\$DATA/$DATA}"
+    echo "command  $*"
+    echo
+    uv run --no-sync "$@" || status=$?
+else
+    mapfile -t lines < <(grep -v -e '^\s*#' -e '^\s*$' "$parallel")
+    # split the CPUs between the runs, or each torch would start a thread per
+    # CPU and they would fight over them
+    export OMP_NUM_THREADS=$(( SLURM_CPUS_PER_TASK / ${#lines[@]} > 0 ? SLURM_CPUS_PER_TASK / ${#lines[@]} : 1 ))
+    echo "parallel ${#lines[@]} runs from $parallel, $OMP_NUM_THREADS threads each"
+    pids=()
+    for i in "${!lines[@]}"; do
+        echo "run $i    ${lines[$i]}  > $base.$i.out"
+        uv run --no-sync bash -c "${lines[$i]}" > "$base.$i.out" 2>&1 &
+        pids+=($!)
+    done
+    for i in "${!pids[@]}"; do
+        run_status=0
+        wait "${pids[$i]}" || run_status=$?
+        echo
+        echo "run $i    exit $run_status after $((SECONDS - start)) s, ending:"
+        tail -n 3 "$base.$i.out" | sed 's/^/         /'
+        [ "$run_status" -eq 0 ] || status=$run_status
+    done
+fi
 kill "$sampler" 2>/dev/null || true
 
 # == summary ===================================================================
@@ -71,5 +136,5 @@ echo
 echo "exit     $status after $((SECONDS - start)) s"
 awk -F', ' '{ u += $1; m = ($2 > m ? $2 : m); n++ }
     END { if (n) printf "gpu      mean %.0f%% busy over %d samples, peak %d MiB\n", u / n, n, m }' \
-    "$gpu_log"
+    "$base.gpu.csv"
 exit "$status"
