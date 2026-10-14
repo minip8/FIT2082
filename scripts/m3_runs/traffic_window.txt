@@ -1,0 +1,15 @@
+# Traffic speed against accuracy: rounds per batch (8, 16) x frozen window (2,
+# 1, 0.5 epochs), whole pool, alone and in series so every timing is clean.
+# Isolated, 16 rounds per batch with a 2-epoch window led XGBoost by 0.047 but
+# took 322 s against its 51 s (README, `m3`), and Traffic's cost is the active
+# window: about 9,100 rounds updated on every batch.
+#
+#     sbatch -c 8 --mem=32G --time=01:00:00 -J traffic-window scripts/m3_job.sh \
+#         --stage Traffic --serial scripts/m3_runs/traffic_window.txt
+
+python scripts/stream_full.py --path "$DATA" --dataset Traffic --model hashboost --epochs 10 --compile --hashes-per-round 8 --active-epochs 2 --label h8_w2 --out results/traffic-window
+python scripts/stream_full.py --path "$DATA" --dataset Traffic --model hashboost --epochs 10 --compile --hashes-per-round 8 --active-epochs 1 --label h8_w1 --out results/traffic-window
+python scripts/stream_full.py --path "$DATA" --dataset Traffic --model hashboost --epochs 10 --compile --hashes-per-round 8 --active-epochs 0.5 --label h8_w0.5 --out results/traffic-window
+python scripts/stream_full.py --path "$DATA" --dataset Traffic --model hashboost --epochs 10 --compile --hashes-per-round 16 --active-epochs 2 --label h16_w2 --out results/traffic-window
+python scripts/stream_full.py --path "$DATA" --dataset Traffic --model hashboost --epochs 10 --compile --hashes-per-round 16 --active-epochs 1 --label h16_w1 --out results/traffic-window
+python scripts/stream_full.py --path "$DATA" --dataset Traffic --model hashboost --epochs 10 --compile --hashes-per-round 16 --active-epochs 0.5 --label h16_w0.5 --out results/traffic-window
