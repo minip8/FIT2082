@@ -43,6 +43,7 @@ Everything runs through `uv` (Python 3.12).
     uv run python scripts/ucr_benchmark.py --compile --models hashboost --bits 2 \
         --rounds 3200 --label hb_b2_r3200            # a HashBoost variant beside the rest
     uv run python scripts/ucr_benchmark.py --compile --shard 0/3   # 1 of 3 concurrent shards
+    sbatch scripts/m3_job.sh python -m fit2082.boost.experiment ...   # on M3 (M3.md)
 
 `--compile` (torch.compile the hash encoding and the leaf refresh) is faster
 but costs a few seconds on first use. The encoding is exact; the fused refresh
