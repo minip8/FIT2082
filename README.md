@@ -738,6 +738,77 @@ best tune-chosen pairs (HashBoost's `auto(G,L)` is its five-seed mean):
   flatters it as the screen flattered HashBoost; round 3 runs it on the
   other 16.
 
+**XGBoost screen, round 3: tuned XGBoost against `auto(G,L)` on all of
+MONSTER** (`72aeeb0`, jobs 61039727-61039731, L40S;
+`scripts/m3_runs/xgb_full.py`). `d4_lr0.1` and `d8_bin64` on the 16
+datasets the screens never used; the screened 10 reuse rounds 1-2.
+`auto(d4_lr0.1,d8_bin64)` picks on tune error as `auto(G,L)` does. XGBoost is
+one run (default = the benchmark run above; error / seconds); HashBoost is
+`auto(G,L)`'s five-seed mean ± sd. Opportunity's `d8_bin64` ran out of the
+L40S's memory, so its `auto` is `d4_lr0.1`:
+
+| dataset | XGBoost default | `d4_lr0.1` | `d8_bin64` | pick | XGBoost `auto` | HashBoost `auto(G,L)` | HB / XGB | |
+| --- | ---: | ---: | ---: | :---: | ---: | ---: | ---: | --- |
+| AudioMNIST-DS | 0.0293 | 0.0215 / 181s | 0.0295 / 268s | d4 | 0.0215 | 0.0146 ± 0.0008 | 0.68 | |
+| CornellWhaleChallenge | 0.1316 | 0.1294 / 23s | 0.1292 / 98s | d8 | 0.1292 | 0.1339 ± 0.0015 | 1.04 | |
+| CrowdSourced | 0.0079 | 0.0085 / 18s | 0.0079 / 31s | d4 | 0.0085 | 0.0053 ± 0.0005 | 0.63 | screened |
+| DREAMERA | 0.0818 | 0.0801 / 416s | 0.0583 / 389s | d8 | 0.0583 | 0.1235 ± 0.0028 | 2.12 | screened |
+| DREAMERV | 0.0811 | 0.0920 / 270s | 0.0635 / 475s | d8 | 0.0635 | 0.1214 ± 0.0022 | 1.91 | |
+| FordChallenge | 0.0459 | 0.0454 / 27s | 0.0339 / 32s | d8 | 0.0339 | 0.0572 ± 0.0011 | 1.68 | screened |
+| FruitFlies | 0.0496 | 0.0452 / 106s | 0.0457 / 189s | d4 | 0.0452 | 0.0447 ± 0.0012 | 0.99 | |
+| InsectSound | 0.1833 | 0.1794 / 82s | 0.1875 / 93s | d4 | 0.1794 | 0.1810 ± 0.0032 | 1.01 | screened |
+| LakeIce | 0.0024 | 0.0012 / 7s | 0.0017 / 8s | d4 | 0.0012 | 0.0010 ± 0.0002 | 0.84 | |
+| LenDB | 0.0471 | 0.0398 / 335s | 0.0427 / 225s | d4 | 0.0398 | 0.0428 ± 0.0018 | 1.08 | screened |
+| MosquitoSound | 0.1018 | 0.0989 / 969s | 0.1038 / 1842s | d4 | 0.0989 | 0.1021 ± 0.0023 | 1.03 | |
+| Opportunity | - | 0.0735 / 192s | OOM | d4 | 0.0735 | 0.0705 ± 0.0009 | 0.96 | |
+| PAMAP2 | 0.0083 | 0.0061 / 196s | 0.0076 / 249s | d4 | 0.0061 | 0.0044 ± 0.0005 | 0.73 | screened |
+| Pedestrian | 0.1924 | 0.1982 / 47s | 0.1782 / 150s | d8 | 0.1782 | 0.1743 ± 0.0011 | 0.98 | |
+| S2Agri-10pc-17 | 0.1770 | 0.1030 / 8163s | 0.0271 / 5380s | d8 | 0.0271 | 0.0265 ± 0.0018 | 0.98 | |
+| S2Agri-10pc-34 | 0.1836 | 0.0952 / 16500s | 0.0166 / 12887s | d8 | 0.0166 | 0.0213 ± 0.0014 | 1.28 | |
+| STEW | 0.0242 | 0.0220 / 59s | 0.0276 / 79s | d4 | 0.0220 | 0.0299 ± 0.0011 | 1.36 | screened |
+| Skoda | 0.0620 | 0.0598 / 167s | 0.0642 / 211s | d4 | 0.0598 | 0.0582 ± 0.0024 | 0.97 | |
+| TimeSen2Crop | 0.0232 | 0.0227 / 5812s | 0.0234 / 6786s | d4 | 0.0227 | 0.0292 ± 0.0005 | 1.29 | |
+| Tiselac | 0.0649 | 0.0579 / 52s | 0.0601 / 53s | d4 | 0.0579 | 0.0545 ± 0.0011 | 0.94 | |
+| Traffic | 0.3330 | 0.3472 / 53s | 0.3020 / 66s | d8 | 0.3020 | 0.2811 ± 0.0023 | 0.93 | screened |
+| UCIActivity | 0.0203 | 0.0120 / 11s | 0.0234 / 12s | d4 | 0.0120 | 0.0080 ± 0.0011 | 0.66 | screened |
+| USCActivity | 0.0723 | 0.0728 / 45s | 0.0725 / 59s | d4 | 0.0728 | 0.0779 ± 0.0023 | 1.07 | |
+| WISDM | 0.0134 | 0.0134 / 5s | 0.0154 / 8s | d4 | 0.0134 | 0.0097 ± 0.0005 | 0.73 | screened |
+| WISDM2 | 0.0146 | 0.0129 / 50s | 0.0127 / 37s | d4 | 0.0129 | 0.0209 ± 0.0016 | 1.62 | |
+| WhaleSounds | 0.2947 | 0.2849 / 354s | 0.2834 / 660s | d8 | 0.2834 | 0.3100 ± 0.0046 | 1.09 | |
+
+HashBoost `auto(G,L)` against XGBoost `auto(d4_lr0.1,d8_bin64)`. Geo ratio is
+HashBoost's error over XGBoost's; ahead / level / behind uses `auto(G,L)`'s
+five-seed 95% interval as before; the Wilcoxon signed-rank test is on the
+per-dataset errors; time is training seconds for both arms of each `auto`:
+
+| datasets | geo ratio | HB ahead / level / behind | Wilcoxon p | HashBoost time | XGBoost time |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| screened 10 | 1.007 | 5 / 1 / 4 | 0.85 | 1,657s | 2,386s |
+| held-out 16 | 1.072 | 4 / 4 / 8 | 0.21 | 5,343s | 62,040s |
+| all 26 | 1.047 | 9 / 5 / 12 | 0.20 | 7,001s | 64,426s |
+
+* **Tuned XGBoost is slightly ahead on average, not significantly.** On the
+  16 datasets neither screen chose on, HashBoost's error is 1.072x XGBoost's
+  geometrically (it was 0.913x against default XGBoost), and over all 26
+  1.047x, with Wilcoxon p = 0.20. Neither model is better across MONSTER on
+  this evidence.
+* **They win on different datasets.** HashBoost leads on the small activity
+  and audio pools (UCIActivity, CrowdSourced, AudioMNIST-DS, PAMAP2, WISDM:
+  0.63-0.73x) and on Traffic (0.93x). XGBoost leads on DREAMERA and DREAMERV
+  (about 2x), FordChallenge and WISDM2 (1.6-1.7x), STEW, TimeSen2Crop and
+  S2Agri-10pc-34 (1.3x).
+* **HashBoost is 9x faster at this accuracy.** 7,001 s against 64,426 s for
+  both arms. S2Agri dominates XGBoost's time (42,930 s: up to 3,771 rounds at
+  depth 8 on 4.65 M rows), but without it the gap is still 3.6x (5,902 s
+  against 21,496 s).
+* **The cap was what had S2Agri at 0.18.** With 5,000 rounds, `d8_bin64`
+  reaches 0.0271 and 0.0166 (2,557 and 3,771 rounds), level with and ahead
+  of HashBoost.
+* **The screen flattered XGBoost's pair as it flattered HashBoost's.** XGBoost's
+  `auto` is level with HashBoost on the screened 10 (1.007x) and better on the
+  held-out 16, where against default XGBoost `auto(G,L)` was 0.857x on the
+  screened 10 and 0.913x on the other 13 (seed 42).
+
 ### benchmark
 
 This branch compares HashBoost against XGBoost on the five MONSTER datasets
