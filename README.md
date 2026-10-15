@@ -641,6 +641,55 @@ five-seed means; time is the mean per seed, summed):
   five seeds on 25 of 26 datasets. On WhaleSounds, where `G` and `L` are
   0.007 apart, it took `G` once.
 
+**XGBoost screen, round 1** (`b526e8c`, jobs 61032362-61032364, L40S;
+`scripts/m3_runs/xgb_screen.py`). HashBoost's configurations came from two
+screens and a tune-slice choice, while XGBoost ran once at its defaults
+(depth 6, learning rate 0.05, 1,000 rounds, 50 of patience), so the
+comparison above flatters HashBoost by tuning effort. XGBoost now goes through
+the same procedure, starting on the same 10 datasets and splits. Every arm
+raises the cap to 5,000 rounds with 100 of patience and changes one thing:
+`base` is the cap alone; `d4`, `d8`, `d10` the depth; `lr0.1` the learning
+rate; `sub` row subsampling 0.8 per tree and columns 0.5 per split; `l2`
+`reg_lambda` 10 with `min_child_weight` 5 (new `stream_full.py` flags, at
+XGBoost's defaults otherwise). Validation error / training seconds / rounds
+run, one run each; HashBoost's `G` and `L` are their five-seed means:
+
+| dataset | default | `base` | `d4` | `d8` | `d10` | `lr0.1` | `sub` | `l2` | HashBoost `G` / `L` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| CrowdSourced | 0.0079 / 51s | 0.0079 / 56s / 306 | **0.0069** / 34s / 472 | OOM | OOM | 0.0085 / 34s / 199 | 0.0090 / 44s / 291 | 0.0111 / 45s / 262 | 0.0053 / 0.0357 |
+| DREAMERA | 0.0818 / 324s | **0.0642** / 796s / 1996 | 0.1018 / 288s / 1427 | OOM | OOM | 0.0649 / 513s / 1238 | 0.0693 / 498s / 1410 | 0.0688 / 686s / 1698 | 0.1429 / 0.1235 |
+| FordChallenge | 0.0459 / 23s | 0.0396 / 52s / 652 | 0.0520 / 28s / 763 | 0.0403 / 40s / 238 | **0.0342** / 62s / 233 | 0.0398 / 35s / 418 | 0.0400 / 59s / 775 | 0.0452 / 41s / 508 | 0.0572 / 0.1045 |
+| InsectSound | 0.1833 / 131s | 0.1833 / 139s / 598 | 0.1924 / 55s / 533 | **0.1804** / 378s / 1090 | 0.1853 / 594s / 823 | 0.1814 / 126s / 588 | 0.1812 / 134s / 674 | 0.1865 / 141s / 578 | 0.1810 / 0.2179 |
+| LenDB | 0.0471 / 208s | 0.0437 / 417s / 594 | 0.0425 / 444s / 941 | **0.0413** / 580s / 509 | OOM | 0.0457 / 181s / 204 | 0.0444 / 276s / 357 | 0.0432 / 291s / 361 | 0.0466 / 0.0428 |
+| PAMAP2 | 0.0083 / 436s | 0.0083 / 479s / 331 | **0.0066** / 335s / 431 | 0.0081 / 573s / 381 | OOM | **0.0066** / 323s / 260 | 0.0073 / 401s / 320 | 0.0085 / 404s / 400 | 0.0044 / 0.0404 |
+| STEW | 0.0242 / 134s | 0.0239 / 166s / 715 | **0.0212** / 80s / 910 | OOM | OOM | 0.0239 / 85s / 353 | 0.0256 / 146s / 786 | 0.0273 / 153s / 683 | 0.0299 / 0.0834 |
+| Traffic | 0.3330 / 57s | 0.3008 / 139s / 2697 | 0.3594 / 84s / 1861 | 0.2734 / 157s / 1665 | **0.2673** / 188s / 1103 | 0.2971 / 112s / 1553 | 0.3054 / 176s / 1965 | 0.3115 / 162s / 1894 | 0.3264 / 0.2811 |
+| UCIActivity | 0.0203 / 22s | 0.0165 / 28s / 360 | **0.0152** / 16s / 332 | 0.0215 / 35s / 274 | 0.0222 / 42s / 347 | 0.0177 / 19s / 251 | 0.0177 / 22s / 271 | 0.0177 / 28s / 392 | 0.0080 / 0.0431 |
+| WISDM | 0.0134 / 10s | 0.0134 / 10s / 339 | **0.0121** / 8s / 436 | 0.0171 / 13s / 294 | 0.0163 / 28s / 480 | 0.0146 / 7s / 235 | 0.0125 / 14s / 330 | 0.0171 / 12s / 353 | 0.0097 / 0.0339 |
+
+* **The cap was costing XGBoost the most.** `base` changes only the cap
+  and patience, and it is never worse than the default, 0.924x its error
+  geometrically: DREAMERA 0.0818 to 0.0642 (best round near 1,900) and
+  Traffic 0.3330 to 0.3008 (2,700 rounds). `lr0.1` gets about the same
+  (0.928x) in fewer rounds.
+* **Depth splits the pools as `G` and `L` do for HashBoost.** Depth 4 is best
+  on the small pools (CrowdSourced, PAMAP2, STEW, UCIActivity, WISDM); depth 8
+  or 10 on the large or hard ones (Traffic 0.2673, now ahead of `L`'s 0.2811;
+  LenDB 0.0413, ahead of `L`'s 0.0428; FordChallenge 0.0342). Neither depth
+  wins everywhere, so XGBoost needs a per-dataset choice too.
+* **Deep trees run out of the L40S's 46 GB on wide features.** Depth 8 or 10
+  failed with a CUDA allocation error on DREAMERA (31,542 QUANT features),
+  CrowdSourced and STEW, and depth 10 on PAMAP2 (54,184) and LenDB, 8 runs in
+  all. XGBoost's histograms grow with features, bins and nodes per level.
+* **Subsampling helps a little; leaf L2 hurts** (0.942x and 1.028x of the
+  default).
+* **Tuning XGBoost closes much of HashBoost's lead.** On these 10 datasets
+  HashBoost's `auto(G,L)` (five-seed mean) is 0.842x default XGBoost's error,
+  but 0.911x of `base`, 0.945x of XGBoost choosing between `d4` and `d8` on
+  tune error, and 0.989x choosing among `d4`, `base`, `d8` and `d10`. HashBoost
+  still leads on the small activity pools (PAMAP2, UCIActivity, CrowdSourced,
+  WISDM) and trails by more on DREAMERA (0.1235 against 0.0642).
+
 ### benchmark
 
 This branch compares HashBoost against XGBoost on the five MONSTER datasets
