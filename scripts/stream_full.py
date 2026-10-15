@@ -986,7 +986,11 @@ def run_xgboost(
         "learning_rate": args.learning_rate,
         "max_depth": args.max_depth,
         "max_bin": args.max_bin,
-        "random_state": args.seed,
+        "subsample": args.subsample,
+        "colsample_bynode": args.colsample_bynode,
+        "min_child_weight": args.min_child_weight,
+        "reg_lambda": args.reg_lambda,
+        "random_state": args.model_seed,
         "eval_metric": "merror",
         "num_boost_round": args.num_boost_round,
         "early_stopping_rounds": args.early_stopping_rounds,
@@ -1310,6 +1314,11 @@ def main() -> None:
     parser.add_argument("--learning-rate", type=float, default=0.05)
     parser.add_argument("--num-boost-round", type=int, default=1000)
     parser.add_argument("--early-stopping-rounds", type=int, default=50)
+    # regularisation, at xgboost's own defaults so earlier runs are unchanged
+    parser.add_argument("--subsample", type=float, default=1.0)
+    parser.add_argument("--colsample-bynode", type=float, default=1.0)
+    parser.add_argument("--min-child-weight", type=float, default=1.0)
+    parser.add_argument("--reg-lambda", type=float, default=1.0)
     parser.add_argument(
         "--cache-dir",
         default=None,
