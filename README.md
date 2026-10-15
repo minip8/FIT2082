@@ -690,6 +690,54 @@ run, one run each; HashBoost's `G` and `L` are their five-seed means:
   still leads on the small activity pools (PAMAP2, UCIActivity, CrowdSourced,
   WISDM) and trails by more on DREAMERA (0.1235 against 0.0642).
 
+**XGBoost screen, round 2** (`3f52205`, jobs 61037121-61037123, same setup;
+`scripts/m3_runs/xgb_screen2.py`). Round 1's depth split suggested a
+small-pool and a large-pool candidate, and 64 histogram bins (a quarter of
+the histogram memory) might let deep trees fit the wide feature sets. Round 1
+arms are repeated for comparison; one run each, validation error / seconds:
+
+| dataset | `d4` | `d4_sub` | `d4_lr0.1` | `base` | `base_bin64` | `d8` | `d8_bin64` | `d10` | `d10_bin64` | `d10_sub_bin64` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| CrowdSourced | 0.0069 / 34s | **0.0058** / 27s | 0.0085 / 18s | 0.0079 / 56s | 0.0074 / 21s | OOM | 0.0079 / 31s | OOM | 0.0127 / 29s | 0.0106 / 25s |
+| DREAMERA | 0.1018 / 288s | 0.0886 / 407s | 0.0801 / 416s | 0.0642 / 796s | 0.0723 / 255s | OOM | **0.0583** / 389s | OOM | OOM | OOM |
+| FordChallenge | 0.0520 / 28s | 0.0564 / 18s | 0.0454 / 27s | 0.0396 / 52s | 0.0496 / 15s | 0.0403 / 40s | 0.0339 / 32s | 0.0342 / 62s | 0.0339 / 34s | **0.0334** / 36s |
+| InsectSound | 0.1924 / 55s | 0.1836 / 69s | **0.1794** / 82s | 0.1833 / 139s | 0.1819 / 100s | 0.1804 / 378s | 0.1875 / 93s | 0.1853 / 594s | 0.1887 / 154s | 0.1846 / 130s |
+| LenDB | 0.0425 / 444s | 0.0444 / 382s | **0.0398** / 335s | 0.0437 / 417s | 0.0417 / 431s | 0.0413 / 580s | 0.0427 / 225s | OOM | 0.0410 / 528s | 0.0413 / 346s |
+| PAMAP2 | 0.0066 / 335s | 0.0063 / 267s | **0.0061** / 196s | 0.0083 / 479s | 0.0103 / 164s | 0.0081 / 573s | 0.0076 / 249s | OOM | 0.0085 / 250s | 0.0076 / 250s |
+| STEW | **0.0212** / 80s | 0.0225 / 78s | 0.0220 / 59s | 0.0239 / 166s | 0.0227 / 63s | OOM | 0.0276 / 79s | OOM | 0.0291 / 160s | 0.0293 / 104s |
+| Traffic | 0.3594 / 84s | 0.3862 / 34s | 0.3472 / 53s | 0.3008 / 139s | 0.3083 / 118s | 0.2734 / 157s | 0.3020 / 66s | 0.2673 / 188s | **0.2527** / 199s | 0.2615 / 281s |
+| UCIActivity | 0.0152 / 16s | 0.0133 / 16s | **0.0120** / 11s | 0.0165 / 28s | 0.0177 / 10s | 0.0215 / 35s | 0.0234 / 12s | 0.0222 / 42s | 0.0285 / 13s | 0.0190 / 15s |
+| WISDM | **0.0121** / 8s | 0.0129 / 6s | 0.0134 / 5s | 0.0134 / 10s | 0.0146 / 8s | 0.0171 / 13s | 0.0154 / 8s | 0.0163 / 28s | 0.0154 / 13s | 0.0150 / 10s |
+
+Geometric mean of each arm's error over the default's, where it ran, and the
+best tune-chosen pairs (HashBoost's `auto(G,L)` is its five-seed mean):
+
+| XGBoost | datasets | error / default | time | HashBoost `auto(G,L)` / it |
+| --- | ---: | ---: | ---: | ---: |
+| `d4_lr0.1` | 10 | **0.901** | 1,201s | |
+| `d4_sub` | 10 | 0.930 | 1,303s | |
+| `d8_bin64` | 10 | 0.953 | 1,184s | |
+| `base_bin64` | 10 | 0.979 | 1,185s | |
+| `d10_sub_bin64` | 9 | 0.973 | 1,199s | |
+| `d10_bin64` | 9 | 1.055 | 1,379s | |
+| `auto(d4_lr0.1,d8_bin64)` | 10 | **0.836** | 2,386s | **1.007** |
+| `auto(d4,d8)` (round 1) | 10 | 0.892 | 3,147s | 0.945 |
+| `auto(d4_lr0.1,d10_sub_bin64)` | 10 | 0.850 | 2,400s | 0.991 |
+
+* **64 bins let depth 8 fit everywhere** and halve its time, at a cost that
+  depends on the pool: DREAMERA improves to 0.0583 (depth 8 did not fit at
+  256 bins), FordChallenge to 0.0339, Traffic loses 0.029. Depth 10 still
+  runs out of memory on DREAMERA at 64 bins.
+* **The small-pool candidate is `d4_lr0.1`**, the best single arm (0.901x the
+  default, in the least time). Subsampling helps depth 4 on CrowdSourced and
+  UCIActivity but not on average.
+* **Tuned this way, XGBoost is level with HashBoost on the screen's 10.**
+  `auto(d4_lr0.1,d8_bin64)` takes XGBoost to 0.836x its default error, and
+  HashBoost's `auto(G,L)` to 1.007x of it, against 0.842x of the default
+  XGBoost. The pair was chosen from 15 on these same 10 datasets, which
+  flatters it as the screen flattered HashBoost; round 3 runs it on the
+  other 16.
+
 ### benchmark
 
 This branch compares HashBoost against XGBoost on the five MONSTER datasets
