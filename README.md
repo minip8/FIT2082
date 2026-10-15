@@ -572,6 +572,75 @@ is the test fold and more seeds for the chosen configurations):
 * **Not solved by any lever:** DREAMERA and DREAMERV stay about 0.04 behind
   XGBoost (1.5x its error), WhaleSounds 0.014 behind.
 
+**Five seeds of `G` and `L`** (`af9787e`, jobs 61024405-61024408, same setup;
+`scripts/m3_runs/seeds.py`). Every number above is one run, and a rerun moved
+error by about 0.005, as large as many of the gaps to XGBoost. So `G` and `L`
+(and with them `auto(G,L)`) were rerun with model seeds 1-4 beside the
+original seed 42, on the same split: the new `--model-seed` seeds the hashes
+and the batch order, while `--seed 42` still draws the rows. Mean ± sd of
+validation error over the five; `auto` picks per seed on tune error, and
+"picks" lists its choice for seeds 42, 1, 2, 3, 4. XGBoost is its one run
+above (its `gpu_hist` training is close to deterministic). The verdict
+calls HashBoost ahead or behind when the gap to XGBoost exceeds the 95%
+interval of `auto`'s mean (2.78 sd / sqrt 5), and level otherwise:
+
+| dataset | `G` | `L` | `auto(G,L)` | picks | XGBoost | `auto` vs XGBoost |
+| --- | ---: | ---: | ---: | :---: | ---: | --- |
+| AudioMNIST-DS | 0.0146 ± 0.0008 | 0.0356 ± 0.0007 | 0.0146 ± 0.0008 | GGGGG | 0.0293 | ahead |
+| CornellWhaleChallenge | 0.1339 ± 0.0015 | 0.1350 ± 0.0014 | 0.1339 ± 0.0015 | GGGGG | 0.1316 | behind |
+| CrowdSourced | 0.0053 ± 0.0005 | 0.0357 ± 0.0036 | 0.0053 ± 0.0005 | GGGGG | 0.0079 | ahead |
+| DREAMERA | 0.1429 ± 0.0038 | 0.1235 ± 0.0028 | 0.1235 ± 0.0028 | LLLLL | 0.0818 | behind |
+| DREAMERV | 0.1425 ± 0.0043 | 0.1214 ± 0.0022 | 0.1214 ± 0.0022 | LLLLL | 0.0811 | behind |
+| FordChallenge | 0.0572 ± 0.0011 | 0.1045 ± 0.0017 | 0.0572 ± 0.0011 | GGGGG | 0.0459 | behind |
+| FruitFlies | 0.0447 ± 0.0012 | 0.0587 ± 0.0020 | 0.0447 ± 0.0012 | GGGGG | 0.0496 | ahead |
+| InsectSound | 0.1810 ± 0.0032 | 0.2179 ± 0.0039 | 0.1810 ± 0.0032 | GGGGG | 0.1833 | level |
+| LakeIce | 0.0010 ± 0.0002 | 0.0015 ± 0.0002 | 0.0010 ± 0.0002 | GGGGG | 0.0024 | ahead |
+| LenDB | 0.0466 ± 0.0012 | 0.0428 ± 0.0018 | 0.0428 ± 0.0018 | LLLLL | 0.0471 | ahead |
+| MosquitoSound | 0.1021 ± 0.0023 | 0.1162 ± 0.0010 | 0.1021 ± 0.0023 | GGGGG | 0.1018 | level |
+| Opportunity | 0.0705 ± 0.0009 | 0.1097 ± 0.0007 | 0.0705 ± 0.0009 | GGGGG | out of memory |  |
+| PAMAP2 | 0.0044 ± 0.0005 | 0.0404 ± 0.0009 | 0.0044 ± 0.0005 | GGGGG | 0.0083 | ahead |
+| Pedestrian | 0.2005 ± 0.0023 | 0.1743 ± 0.0011 | 0.1743 ± 0.0011 | LLLLL | 0.1924 | ahead |
+| S2Agri-10pc-17 | 0.0454 ± 0.0022 | 0.0265 ± 0.0018 | 0.0265 ± 0.0018 | LLLLL | 0.1770 cap | ahead |
+| S2Agri-10pc-34 | 0.0398 ± 0.0021 | 0.0213 ± 0.0014 | 0.0213 ± 0.0014 | LLLLL | 0.1836 cap | ahead |
+| STEW | 0.0299 ± 0.0011 | 0.0834 ± 0.0031 | 0.0299 ± 0.0011 | GGGGG | 0.0242 | behind |
+| Skoda | 0.0582 ± 0.0024 | 0.1206 ± 0.0039 | 0.0582 ± 0.0024 | GGGGG | 0.0620 | ahead |
+| TimeSen2Crop | 0.0292 ± 0.0005 | 0.0406 ± 0.0013 | 0.0292 ± 0.0005 | GGGGG | 0.0232 | behind |
+| Tiselac | 0.0545 ± 0.0011 | 0.0622 ± 0.0007 | 0.0545 ± 0.0011 | GGGGG | 0.0649 | ahead |
+| Traffic | 0.3264 ± 0.0126 | 0.2811 ± 0.0023 | 0.2811 ± 0.0023 | LLLLL | 0.3330 | ahead |
+| UCIActivity | 0.0080 ± 0.0011 | 0.0431 ± 0.0018 | 0.0080 ± 0.0011 | GGGGG | 0.0203 | ahead |
+| USCActivity | 0.0779 ± 0.0023 | 0.0918 ± 0.0029 | 0.0779 ± 0.0023 | GGGGG | 0.0723 | behind |
+| WISDM | 0.0097 ± 0.0005 | 0.0339 ± 0.0012 | 0.0097 ± 0.0005 | GGGGG | 0.0134 | ahead |
+| WISDM2 | 0.0209 ± 0.0016 | 0.0250 ± 0.0011 | 0.0209 ± 0.0016 | GGGGG | 0.0146 | behind |
+| WhaleSounds | 0.3159 ± 0.0053 | 0.3085 ± 0.0018 | 0.3100 ± 0.0046 | LGLLL | 0.2947 | behind |
+
+Over the 23 datasets with a fair XGBoost number (geo ratio as above, on the
+five-seed means; time is the mean per seed, summed):
+
+| configuration | geo ratio, seed 42 | geo ratio, mean of 5 | ahead / level / behind | time |
+| --- | ---: | ---: | ---: | ---: |
+| `auto(G,L)` | 0.888 | **0.894** | 12 / 2 / 9 | 5,713s |
+| `G` | 0.916 | 0.922 | 9 / 4 / 10 | 2,752s |
+| `L` | 1.497 | 1.512 | 5 / 0 / 18 | 2,962s |
+
+* **The single-run conclusions hold.** The five-seed geo ratios are within
+  0.015 of seed 42's, in the same order, and `auto(G,L)` still beats XGBoost
+  on average in under half its time (5,713 s against 12,018 s).
+* **Runs vary less than the one rerun suggested.** The sd is 0.0002-0.0024
+  on most datasets and 0.003-0.005 on InsectSound, DREAMER and WhaleSounds.
+  The outlier is `G` on Traffic (sd 0.0126), the pool gain overfits, where
+  `auto` takes the steadier `L` (sd 0.0023) every time.
+* **So the tighter count replaces "level" with real verdicts.** With a fixed
+  0.006 margin the single runs were 6 / 12 / 5; against the five-seed
+  interval `auto(G,L)` is ahead of XGBoost on 12 datasets and behind on 9.
+  The 9 are CornellWhaleChallenge, STEW, FordChallenge, TimeSen2Crop,
+  USCActivity, WISDM2 and WhaleSounds by 0.002-0.015, and DREAMERA and
+  DREAMERV by 0.04. Cornell's 0.0023 gap is real here but small. The test
+  treats XGBoost's one run as exact, and it speaks for this validation set,
+  not for other splits.
+* **The tune choice is stable.** `auto` picks the same configuration for all
+  five seeds on 25 of 26 datasets. On WhaleSounds, where `G` and `L` are
+  0.007 apart, it took `G` once.
+
 ### benchmark
 
 This branch compares HashBoost against XGBoost on the five MONSTER datasets
