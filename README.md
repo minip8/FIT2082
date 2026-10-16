@@ -809,6 +809,110 @@ per-dataset errors; time is training seconds for both arms of each `auto`:
   held-out 16, where against default XGBoost `auto(G,L)` was 0.857x on the
   screened 10 and 0.913x on the other 13 (seed 42).
 
+**The test folds: frozen picks on MONSTER's five folds** (`99fa5bc`, jobs
+61059735-61059744, 10 L40S; `scripts/m3_runs/test_runs.py`). With the
+configurations frozen, each dataset trains its fold-0 tune pick for each model
+(HashBoost `G` or `L`, XGBoost `d4_lr0.1` or `d8_bin64`, as in the tables
+above) once on each of MONSTER's folds 0-4: 260 runs, all of which finished.
+Training, validation and tune rows come from the fold's training pool as on
+fold 0 (seed 42). Each model is scored once on the held-out fold at its
+tune-chosen round. HashBoost restores a snapshot taken at its best tune
+evaluation; XGBoost predicts with `iteration_range` up to `best_iteration`.
+Every restored model reproduced its recorded validation error (XGBoost's to
+float32 rounding, at most 4e-9).
+
+Test error is the mean over the five folds, from one seed per fold. Ahead
+means a 95% paired-t interval over the five per-fold differences excludes 0.
+Validation is the five-fold mean of each model's own validation error. Time is
+the training seconds summed over the five folds:
+
+| dataset | picks (HB / XGB) | HashBoost test | XGBoost test | HB / XGB | | validation (HB / XGB) | time (HB / XGB) |
+| --- | --- | ---: | ---: | ---: | --- | ---: | ---: |
+| AudioMNIST-DS | `G` / `d4_lr0.1` | 0.0816 | 0.0884 | 0.92 | HB ahead | 0.0172 / 0.0229 | 503s / 885s |
+| CornellWhaleChallenge | `G` / `d8_bin64` | 0.1250 | 0.1233 | 1.01 |  | 0.1292 / 0.1297 | 290s / 424s |
+| CrowdSourced | `G` / `d4_lr0.1` | 0.3501 | 0.3622 | 0.97 |  | 0.0033 / 0.0048 | 192s / 95s |
+| DREAMERA | `L` / `d8_bin64` | 0.5161 | 0.5312 | 0.97 |  | 0.1349 / 0.0713 | 438s / 1,775s |
+| DREAMERV | `L` / `d8_bin64` | 0.4036 | 0.4038 | 1.00 |  | 0.1393 / 0.0778 | 434s / 2,264s |
+| FordChallenge | `G` / `d8_bin64` | 0.0823 | 0.0731 | 1.13 | XGB ahead | 0.0556 / 0.0354 | 196s / 152s |
+| FruitFlies | `G` / `d4_lr0.1` | 0.0458 | 0.0462 | 0.99 |  | 0.0450 / 0.0480 | 383s / 384s |
+| InsectSound | `G` / `d4_lr0.1` | 0.1872 | 0.1891 | 0.99 |  | 0.1843 / 0.1877 | 520s / 357s |
+| LakeIce | `G` / `d4_lr0.1` | 0.0018 | 0.0019 | 0.94 |  | 0.0018 / 0.0020 | 195s / 38s |
+| LenDB | `L` / `d4_lr0.1` | 0.0538 | 0.0522 | 1.03 |  | 0.0379 / 0.0387 | 728s / 1,364s |
+| MosquitoSound | `G` / `d4_lr0.1` | 0.1052 | 0.1008 | 1.04 | XGB ahead | 0.1062 / 0.1021 | 1,855s / 5,054s |
+| Opportunity | `G` / `d4_lr0.1` | 0.1322 | 0.1305 | 1.01 |  | 0.0745 / 0.0746 | 399s / 852s |
+| PAMAP2 | `G` / `d4_lr0.1` | 0.2143 | 0.2246 | 0.95 |  | 0.0042 / 0.0053 | 277s / 1,025s |
+| Pedestrian | `L` / `d8_bin64` | 0.1746 | 0.1772 | 0.99 |  | 0.1753 / 0.1788 | 2,588s / 792s |
+| S2Agri-10pc-17 | `L` / `d8_bin64` | 0.2829 | 0.2525 | 1.12 | XGB ahead | 0.0275 / 0.0199 | 1,463s / 30,068s |
+| S2Agri-10pc-34 | `L` / `d8_bin64` | 0.2828 | 0.2530 | 1.12 | XGB ahead | 0.0188 / 0.0158 | 2,013s / 61,933s |
+| STEW | `G` / `d4_lr0.1` | 0.1937 | 0.1993 | 0.97 |  | 0.0348 / 0.0265 | 325s / 310s |
+| Skoda | `G` / `d4_lr0.1` | 0.0567 | 0.0610 | 0.93 |  | 0.0552 / 0.0586 | 354s / 784s |
+| TimeSen2Crop | `G` / `d4_lr0.1` | 0.1412 | 0.0849 | 1.66 | XGB ahead | 0.0299 / 0.0205 | 1,926s / 35,655s |
+| Tiselac | `G` / `d4_lr0.1` | 0.2139 | 0.2140 | 1.00 |  | 0.0484 / 0.0520 | 396s / 268s |
+| Traffic | `L` / `d8_bin64` | 0.2841 | 0.2939 | 0.97 |  | 0.2815 / 0.2935 | 846s / 407s |
+| UCIActivity | `G` / `d4_lr0.1` | 0.0521 | 0.0675 | 0.77 |  | 0.0096 / 0.0170 | 169s / 46s |
+| USCActivity | `G` / `d4_lr0.1` | 0.2428 | 0.2396 | 1.01 |  | 0.0750 / 0.0710 | 497s / 305s |
+| WISDM | `G` / `d4_lr0.1` | 0.1152 | 0.2142 | 0.54 | (fold 3, below) | 0.0099 / 0.1258 | 161s / 22s |
+| WISDM2 | `G` / `d4_lr0.1` | 0.2556 | 0.2541 | 1.01 |  | 0.0274 / 0.0180 | 458s / 206s |
+| WhaleSounds | `L` / `d8_bin64` | 0.3128 | 0.2802 | 1.12 | XGB ahead | 0.3139 / 0.2807 | 612s / 3,633s |
+
+Geo ratio is HashBoost's test error over XGBoost's; the Wilcoxon signed-rank
+test is on the 26 five-fold means:
+
+| datasets | geo ratio | HB ahead / level / behind | HB lower (raw) | Wilcoxon p | HashBoost time | XGBoost time |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| all 26 | 0.992 | 1 / 19 / 6 | 15 / 26 | 0.71 | 18,214s | 149,099s |
+| all 26, WISDM without fold 3 | 1.017 | | 14 / 26 | 0.96 | | |
+| without S2Agri (24) | 0.982 | 1 / 19 / 4 | 15 / 24 | 0.28 | 14,738s | 57,098s |
+| screened 10 | 0.913 | 0 / 9 / 1 | 8 / 10 | 0.020 | 3,850s | 5,553s |
+| held-out 16 | 1.045 | 1 / 10 / 5 | 7 / 16 | 0.16 | 14,364s | 143,546s |
+
+![HashBoost against XGBoost, MONSTER test folds](paper/figures/monster_test_scatter.png)
+
+* **On the test folds the two models are level.** HashBoost's error is
+  0.992x XGBoost's geometrically, or 1.017x without the failed WISDM fold.
+  The Wilcoxon p is 0.71 (0.96 without that fold), and HashBoost has the lower
+  error on 15 of 26 datasets and on 61 of 130 dataset-folds. Validation said
+  much the same (1.047x in round 3 above): tuned XGBoost is no better than
+  HashBoost across MONSTER, and HashBoost is no better than it.
+* **Where one model leads, it is mostly XGBoost.** Six datasets clear the
+  five-fold interval for XGBoost: TimeSen2Crop (1.66x), FordChallenge,
+  WhaleSounds, both S2Agri subsets (1.12-1.13x) and MosquitoSound (1.04x).
+  Only AudioMNIST-DS (0.92x) clears it for HashBoost. HashBoost's leads on
+  UCIActivity, PAMAP2, CrowdSourced and WISDM are real on most folds but too
+  variable across folds to clear five-fold intervals.
+* **The screened-10 result is selection, not ability.** HashBoost is
+  ahead there (0.913x, p = 0.020) and behind on the held-out 16 (1.045x). That
+  is the screen's optimism showing up again. Both models' configurations were
+  chosen on those 10, but HashBoost's came out of many more rounds of
+  development there.
+* **DREAMERA and DREAMERV's 2x deficit was a validation artefact.** XGBoost's
+  validation error there is half HashBoost's (0.071 against 0.135), but on
+  the test folds both are near 0.5 and 0.4, with HashBoost slightly lower. On
+  every DREAMERA fold XGBoost fits the random validation rows better, and that
+  does not transfer to the held-out fold.
+* **Test error is about 3.3x validation error, for both models** (geometric
+  means 3.33x and 3.23x). MONSTER's folds hold out whole groups, while
+  validation and tune rows are random draws from the training pool, so
+  validation is optimistic. The bias is common to both models and leaves the
+  comparison fair. Nine datasets keep test close to validation: Pedestrian,
+  InsectSound, LakeIce, FruitFlies, Skoda, MosquitoSound,
+  CornellWhaleChallenge, WhaleSounds and Traffic.
+* **XGBoost diverged on WISDM fold 3.** `d4_lr0.1`'s training error swings
+  between 0.57 and 0.91 from round 0 and never falls, so tune error is
+  lowest at round 0 and its test error is 0.683. HashBoost's is 0.174. That
+  pattern points to a non-finite or extreme feature in that fold's QUANT
+  output, not to an inaccuracy XGBoost would also show on clean data, but this
+  has not been checked. The table counts the fold as it ran; the second row of
+  the summary drops it for both models.
+* **HashBoost trained 8.2x faster**: 18,214 s against 149,099 s over the five
+  folds, or 3.9x (14,738 s against 57,098 s) without S2Agri, where XGBoost
+  spends 92,001 s. On small pools XGBoost is faster, because HashBoost's fixed
+  cost per round dominates: UCIActivity takes 169 s against 46 s, LakeIce 195 s
+  against 38 s and Pedestrian 2,588 s against 792 s.
+
+    uv run python scripts/m3_runs/test_runs.py   # writes test_f{0-4}{a,b}.txt
+    # each line: stream_full.py ... --fold k --test --output-dir results/test/fold{k}
+
 ### benchmark
 
 This branch compares HashBoost against XGBoost on the five MONSTER datasets
