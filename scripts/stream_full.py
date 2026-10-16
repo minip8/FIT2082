@@ -113,8 +113,14 @@ REFERENCE_N_REF = {"InsectSound": 32768}
 
 
 def split_indices(
-    path: str, dataset: str, seed: int, n_ref: int, n_va: int, n_te: int
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    path: str,
+    dataset: str,
+    seed: int,
+    n_ref: int,
+    n_va: int,
+    n_te: int,
+    fold: int = 0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """The notebook's split, with everything it left on the floor added to train.
 
     `notebooks/compare.ipynb` shuffles the non-fold-0 rows and takes the first
@@ -122,14 +128,25 @@ def split_indices(
     keeping the same validation and test slices means the only thing that
     changes here is the size of the training set -- the numbers stay comparable
     to every earlier run on the same dataset.
+
+    `fold` picks MONSTER's test fold, whose rows are returned last and are
+    never trained, validated or tuned on. Fold 0 is the split every earlier run
+    used. Another fold's pool differs by a few rows, so there the training
+    slice gives way to keep validation and tune at full size, where fold 0
+    instead refuses a pool it would have to shrink.
     """
 
     np.random.seed(seed)
 
     Y = np.load(f"{path}/{dataset}/{dataset}_y.npy", mmap_mode="r")
-    fold = np.loadtxt(f"{path}/{dataset}/test_indices_fold_0.txt")
+    test = np.loadtxt(
+        f"{path}/{dataset}/test_indices_fold_{fold}.txt", dtype=np.int64, ndmin=1
+    )
 
-    ix = np.setdiff1d(np.arange(Y.shape[0]), fold)
+    ix = np.setdiff1d(np.arange(Y.shape[0]), test)
+
+    if fold:
+        n_ref = min(n_ref, ix.shape[0] - n_va - n_te)
 
     # a pool too small to reach the validation slice at all would leave the run
     # with nothing to evaluate on, several hours in
@@ -152,7 +169,7 @@ def split_indices(
     # the reference run's training rows, plus everything it never looked at
     tr = np.concatenate([ix[:n_ref], ix[n_ref + n_va + n_te :]])
 
-    return tr, va, te
+    return tr, va, te, test
 
 
 # == streaming =================================================================
@@ -452,6 +469,37 @@ def features(raw: np.ndarray, transform: Transform, device: str) -> torch.Tensor
     return transform.transform(torch.as_tensor(raw, device=device))
 
 
+def score_test(
+    predict: Callable[[torch.Tensor], torch.Tensor],
+    stream: "RawStream",
+    transform: Transform,
+    test: np.ndarray,
+    device: str,
+) -> dict[str, Any]:
+    """Error of the tune-chosen model on the test fold, scored once at the end.
+
+    The fold can be far larger than the holdouts (S2Agri's is 1.19 M rows), so
+    it is read and transformed a batch at a time, never held as features.
+    `predict` maps a batch's features to predicted labels.
+    """
+
+    wall = time.perf_counter()
+    wrong = 0
+
+    with torch.no_grad():
+        for start in range(0, test.shape[0], stream.batch_size):
+            raw, y = stream.gather(test[start : start + stream.batch_size])
+            Y = torch.as_tensor(y.astype(np.int64), device=device)
+            wrong += int((predict(features(raw, transform, device)) != Y).sum())
+
+    error = wrong / test.shape[0]
+    seconds = time.perf_counter() - wall
+
+    print(f"  test: {error:.4f} on {test.shape[0]} rows ({seconds:.0f}s)", flush=True)
+
+    return {"merror": error, "n": int(test.shape[0]), "wall_s": seconds}
+
+
 # == hashboost =================================================================
 
 
@@ -505,6 +553,7 @@ def run_hashboost(
     args: argparse.Namespace,
     device: str,
     checkpoint: Callable[[dict[str, Any]], None],
+    test: np.ndarray | None = None,
 ) -> dict[str, Any]:
 
     # `rounds` below counts batches, as it always has, so curves stay comparable
@@ -612,6 +661,14 @@ def run_hashboost(
 
     records: dict[str, list[tuple[int, float]]] = {name: [] for name in holdouts}
     peak_mb = gpu_used_mb(device)
+
+    # with a test fold, the model at each new best tune evaluation, since the
+    # one early stopping picks is gone by the time training ends
+    if test is not None and not isinstance(model, HashBoost):
+        raise SystemExit("--test scores a single HashBoost, not a bagged one")
+    best_tune = float("inf")
+    best_model: dict[str, Any] | None = None
+    snapshot_s = 0.0
     read_wait_s = 0.0
     transform_s = 0.0
     fit_s = 0.0
@@ -707,6 +764,14 @@ def run_hashboost(
             evaluate()
             eval_s += time.perf_counter() - mark
 
+            # strictly better, so a tie keeps the first, as `tuned` does
+            if test is not None and records["tune"][-1][1] < best_tune:
+                assert isinstance(model, HashBoost)
+                mark = time.perf_counter()
+                best_tune = records["tune"][-1][1]
+                best_model = model.snapshot()
+                snapshot_s += time.perf_counter() - mark
+
             timeline.append(
                 {
                     "round": rounds,
@@ -784,6 +849,26 @@ def run_hashboost(
         "best_round": best_round,
     }
 
+    if test is not None:
+        assert isinstance(model, HashBoost) and best_model is not None
+        model.restore(best_model)
+
+        # the restored model must be the one `tuned` was read from
+        with torch.no_grad():
+            X, Y = holdouts["va"]
+            check = (model.predict(X).argmax(-1) != Y).to(torch.float32).mean().item()
+
+        result["test"] = {
+            **score_test(
+                lambda Z: model.predict(Z).argmax(-1), stream, transform, test, device
+            ),
+            "round": best_model["num_rounds"] // args.hashes_per_round,
+            "va_check": check,
+            "snapshot_s": snapshot_s,
+        }
+        print(f"  restored round {best_round}: va {check:.4f} (tuned {tuned:.4f})")
+
+    # the readout refits the final model, so it goes after the test is scored
     if args.readout:
         result["readout"] = readout(model, cache, holdouts, args)
 
@@ -976,6 +1061,7 @@ def run_xgboost(
     args: argparse.Namespace,
     device: str,
     checkpoint: Callable[[dict[str, Any]], None],
+    test: np.ndarray | None = None,
 ) -> dict[str, Any]:
 
     params = {
@@ -1138,12 +1224,28 @@ def run_xgboost(
         flush=True,
     )
 
-    return {
+    result = {
         **entry(evals_result, train),
         "best_iteration": int(booster.best_iteration),
         "early_stopping": "tune",
         "tuned": tuned,
     }
+
+    if test is not None:
+        # trees after the tune-chosen one are dropped, as early stopping means
+        rounds = (0, booster.best_iteration + 1)
+
+        def predict(Z: torch.Tensor) -> torch.Tensor:
+            proba = booster.inplace_predict(Z, iteration_range=rounds)
+            return torch.as_tensor(proba, device=device).argmax(-1)
+
+        result["test"] = score_test(predict, stream, transform, test, device)
+
+        # the raw-feature path must agree with the binned eval set's error
+        X, Y = holdouts["va"]
+        result["test"]["va_check"] = (predict(X) != Y).to(torch.float32).mean().item()
+
+    return result
 
 
 # == main ======================================================================
@@ -1165,6 +1267,17 @@ def main() -> None:
         "control on a smaller pool sit beside the full run in one file.",
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--fold",
+        type=int,
+        default=0,
+        help="MONSTER test fold to hold out (0-4; 0 is every earlier run's split)",
+    )
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="score the tune-chosen model once on the test fold after training",
+    )
     parser.add_argument(
         "--model-seed",
         type=int,
@@ -1365,8 +1478,8 @@ def main() -> None:
     if args.cache_dir is None:
         args.cache_dir = f"/tmp/xgb-extmem/{args.dataset}"
 
-    tr, va, te = split_indices(
-        args.path, args.dataset, args.seed, args.n_ref, args.n_va, args.n_te
+    tr, va, te, test = split_indices(
+        args.path, args.dataset, args.seed, args.n_ref, args.n_va, args.n_te, args.fold
     )
 
     if args.n_tr:
@@ -1455,6 +1568,7 @@ def main() -> None:
     # one transform per results file: `write_results` keeps a single
     # file-level "transform" block, which a PULSAR run would overwrite
     tag = "" if args.transform == "quant" else f"{args.transform}-"
+    tag += f"fold{args.fold}-" if args.fold else ""
     out = Path(args.out) / f"{args.dataset}-{tag}full-{commit_hash()}.json"
 
     info = {
@@ -1462,11 +1576,12 @@ def main() -> None:
         "dataset": args.dataset,
         "device": device,
         "split": {
-            "fold": 0,
+            "fold": args.fold,
             "seed": args.seed,
             "n_tr": int(tr.shape[0]),
             "n_va": int(va.shape[0]),
             "n_te": int(te.shape[0]),
+            "n_test": int(test.shape[0]) if args.test else 0,
             "n_eval_subsample": args.eval_subsample,
             "batch_size": args.batch_size,
             "num_classes": num_classes,
@@ -1483,7 +1598,16 @@ def main() -> None:
 
     runner = run_hashboost if args.model == "hashboost" else run_xgboost
     checkpoint(
-        runner(stream, transform, holdouts, num_classes, args, device, checkpoint)
+        runner(
+            stream,
+            transform,
+            holdouts,
+            num_classes,
+            args,
+            device,
+            checkpoint,
+            test if args.test else None,
+        )
     )
 
     print(f"\nwrote {out}", flush=True)

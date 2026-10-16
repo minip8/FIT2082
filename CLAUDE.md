@@ -27,7 +27,7 @@ minute, and never leaves a reserved GPU idle (admins cancel such jobs).
 
 Everything runs through `uv` (Python 3.12).
 
-    uv run pytest                                   # 222 tests; CUDA-only ones skip without a GPU
+    uv run pytest                                   # 224 tests; CUDA-only ones skip without a GPU
     uv run pytest tests/test_boost.py::test_name    # single test
     uv run ruff check . && uv run ruff format .
     uv run ty check

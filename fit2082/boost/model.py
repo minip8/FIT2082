@@ -600,6 +600,51 @@ class HashBoost:
 
         return self
 
+    def snapshot(self, device: str | torch.device = "cpu") -> dict[str, Any]:
+        """A copy of what prediction reads, for restoring the model later.
+
+        Early stopping picks a round after training has gone past it, and with
+        frozen windows the active rounds' leaves keep moving, so the chosen
+        model is not a prefix of the final one. Only the first `num_rounds` of
+        the leaf logits and predicates are copied (the tables are allocated at
+        `max_num_hashes`), and to the host by default: `L` on S2Agri's 34
+        classes would hold another 2.8 GB on the card.
+        """
+
+        n = self.num_rounds
+
+        return {
+            "num_rounds": n,
+            "logits": self.tables.logits[:n].to(device, copy=True),
+            "partitioner": {
+                name: value[:n].to(device, copy=True)
+                for name, value in vars(self.partitioner).items()
+                if isinstance(value, torch.Tensor)
+            },
+        }
+
+    def restore(self, snapshot: dict[str, Any]) -> "HashBoost":
+        """Predict as the model did when `snapshot` was taken.
+
+        The leaf statistics are not restored, so this is for prediction only:
+        training on after it would refresh the restored leaves from later
+        statistics.
+        """
+
+        n = int(snapshot["num_rounds"])
+        self.num_rounds = n
+        self.tables.logits[:n].copy_(snapshot["logits"])
+
+        for name, value in snapshot["partitioner"].items():
+            getattr(self.partitioner, name)[:n].copy_(value)
+
+        self._frozen_upto = None
+        self._frozen_logits = None
+        self._codes_upto = None
+        self._codes_cache = None
+
+        return self
+
     def __repr__(self) -> str:
 
         return (

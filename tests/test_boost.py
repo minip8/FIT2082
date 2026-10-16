@@ -793,6 +793,30 @@ def test_state_dict_round_trip(device):
     assert torch.allclose(restored.predict(X), model.predict(X), atol=1e-6)
 
 
+@pytest.mark.parametrize("device", DEVICES)
+def test_restore_predicts_as_at_the_snapshot(device):
+
+    # a frozen window and row ids exercise both caches restore has to drop
+    X, Y, k = _data()
+    rows = np.arange(X.shape[0])
+
+    model = HashBoost(num_classes=k, max_num_hashes=40, active_rounds=4, device=device)
+    for _ in range(6):
+        model.fit_batch(X, Y, rows=rows)
+
+    then = model.predict(X).clone()
+    snapshot = model.snapshot()
+
+    for _ in range(10):
+        model.fit_batch(X, Y, rows=rows)
+    assert not torch.allclose(model.predict(X), then, atol=1e-6)
+
+    model.restore(snapshot)
+
+    assert model.num_rounds == 6
+    assert torch.allclose(model.predict(X), then, atol=1e-6)
+
+
 # == mass-adaptive leaf smoothing ==============================================
 
 
