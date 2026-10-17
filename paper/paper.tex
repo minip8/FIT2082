@@ -158,8 +158,16 @@ leaves are fitted. CatBoost chooses each level's split greedily by gain over
 the whole training set, and fixes the leaves once the tree is built. HashBoost
 chooses predicates at random from a single mini-batch, and keeps
 re-estimating every round's leaves as later batches arrive
-(\cref{sec:method}). \todo{position more carefully against BDT: check whether
-it also re-estimates leaves}
+(\cref{sec:method}). Boosted decision tables~\cite{lou2017bdt} are the
+closest relative. They choose a table's tests greedily by squared-error gain
+over the whole training set, then \emph{backfit} them: each test is removed
+and re-chosen given the others, one pass at a time. A table's leaf values are
+set once, as the mean target in each partition, and earlier tables are never
+revisited. HashBoost does the opposite on both counts. Its tests are never
+searched for, and the leaves of every earlier round are re-estimated by each
+later batch. That online re-estimation of leaves across rounds is closer to
+backfitting additive models~\cite{buja1989linear} than to BDT's backfitting of
+splits within one table.
 
 \paragraph{Randomised partitions.}
 Random forests~\cite{breiman2001random} and extremely randomised
@@ -482,10 +490,11 @@ $10^{-4}$. About 0.5\% of its local features differ, all at ties.
 XGBoost (GPU \code{hist}, depth 6), LightGBM (31 leaves) and CatBoost (GPU,
 depth 6), all with learning rate 0.05, up to 1,000 rounds and early stopping
 after 50 rounds without improvement. A single unpruned decision tree is included
-as a floor. \todo{Tree-model figures are the best point on the validation
-curve, i.e.\ selected on validation. HashBoost figures are the final error.
-This flatters the trees, but it should still be made consistent, e.g.\ by
-early-stopping on the tune slice.}
+as a floor. In these development runs the tree models' figures are the
+best point on their validation curves, while HashBoost's are its final error.
+That favours the trees, and we leave it as run, because the final benchmark
+(\cref{sec:monster}) supersedes these numbers. There every model stops on the
+tune slice and is scored on test folds it never saw.
 
 In the final MONSTER benchmark the baselines are XGBoost, tuned by the same
 procedure as HashBoost (below), and ExtraTrees with QUANT's own settings (200
@@ -638,7 +647,7 @@ point.
         \midrule
         HashBoost vs XGBoost     & 1.016 & 14/0/12 & 1/6  & 0.98  \\
         HashBoost vs ExtraTrees  & 0.904 & 18/0/8  & 9/5  & 0.11  \\
-        XGBoost vs ExtraTrees    & 0.890 & 20/0/6  & 13/3 & 0.030 \\
+        XGBoost vs ExtraTrees    & 0.890 & 20/0/6  & 13/3 & 0.031 \\
         \bottomrule
     \end{tabular}
 \end{table}
@@ -667,9 +676,20 @@ unadjusted) and 1.045 times on the other 16 ($p = 0.16$). Both models were
 screened on those 10, but HashBoost was developed on them over many more
 rounds.
 
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.75\linewidth]{figures/monster_cd.pdf}
+    \caption{Critical difference diagram over MONSTER's 26
+        datasets~\cite{demsar2006statistical}: test error, mean of the five
+        folds. A Friedman test rejects equal ranks ($p = 0.016$). The bar joins
+        models within the Nemenyi critical difference (0.65) of each other at
+        $\alpha = 0.05$.}
+    \label{fig:monster-cd}
+\end{figure}
+
 \paragraph{Both boosters beat ExtraTrees on MONSTER.}
 The mean ranks are 1.77 for HashBoost, 1.77 for XGBoost and 2.46 for
-ExtraTrees. A Friedman test rejects equal ranks ($p = 0.016$). ExtraTrees is
+ExtraTrees (\cref{fig:monster-cd}). A Friedman test rejects equal ranks ($p = 0.016$). ExtraTrees is
 0.69 behind both boosters, just beyond the Nemenyi critical difference of 0.65
 at $\alpha = 0.05$. On UCR it was significantly ahead of both
 (\cref{sec:ucr}). Its largest losses are on the big acoustic and sensor pools:
@@ -689,6 +709,31 @@ where XGBoost spent 92,001\,s, the factor is 3.9 (14,738\,s against
 cost per round is mostly fixed: UCIActivity took 169\,s against 46\,s, and
 LakeIce 195\,s against 38\,s. ExtraTrees took 116,546\,s on 36 CPU cores,
 which is not directly comparable.
+
+\Cref{fig:monster-time} shows where the time goes on the six largest pools.
+On S2Agri-10pc-34, HashBoost reaches its tune-chosen point (validation
+0.0200) after 375\,s, and XGBoost reaches its point (0.0166) after
+12,661\,s. On TimeSen2Crop the times are 398\,s and 5,256\,s, for 0.0278
+against 0.0227. On these pools XGBoost's extra hour or more buys its accuracy
+lead. HashBoost, though, stopped at its budget of 5,000 batches on
+every S2Agri and Traffic fold but one, with its best tune error in the last
+1,000 batches. It was still improving there, so its error on these pools is
+partly set by the budget. On Traffic and Pedestrian its curve sits at or
+below XGBoost's throughout. On LenDB it reaches 0.0410 in 69\,s, where
+XGBoost needs 292\,s to reach 0.0398.
+
+% src: notebooks/monster.ipynb
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/monster_time.pdf}
+    \caption{Validation error against training time on fold 0 for the six
+        largest pools, each booster at its frozen configuration, on one L40S.
+        QUANT is included. HashBoost's time is measured at each evaluation;
+        XGBoost's is its build plus its mean time per round, since its rounds
+        cost nearly the same each. Rings mark the tune-chosen point. The
+        horizontal axis is logarithmic.}
+    \label{fig:monster-time}
+\end{figure}
 
 \paragraph{Test error is about 3.3 times validation error.}
 That holds for all three models (geometric means of 3.33 for HashBoost, 3.23
@@ -1108,10 +1153,6 @@ default's 2.6\,GB because each batch adds 16 rounds. Tuned XGBoost peaked at
 17.1--17.8\,GB on the same pools. On the test folds the two are close (0.0538
 against 0.0522).
 
-\todo{A figure: validation error against wall time (or rounds) for HashBoost
-and XGBoost at 65k and full pool. The data is in results/LenDB-full-*.json and
-results/Traffic-full-*.json. notebooks/streaming.ipynb may already plot it.}
-
 \subsection{What did not work}
 \label{sec:negative}
 
@@ -1251,6 +1292,11 @@ run is dominated by the feature transform and I/O, not the model.
           longer. It does better there (0.973 against 1.045 on the other 16).
           The UCR results are test error, but from the default split only,
           one run each, where the bake-off averages 30 resamples.
+    \item HashBoost's budget of 5,000 batches stopped it while still improving on
+          the largest pools (S2Agri and Traffic), where the tune slice would
+          otherwise have chosen a later round. A budget scaled with the pool
+          might narrow its deficit on S2Agri; it was not tried, to keep the
+          configuration frozen.
     \item On MONSTER, validation error underestimates test error about
           3.3-fold, because the validation and tune slices are random draws
           from a pool whose test fold differs from it. Choices made on
@@ -1312,9 +1358,7 @@ to linear.
           bits, 3,200 rounds) and MONSTER's (\code{G}/\code{L}) differ.
           Say whether one rule (e.g.\ a width from rows per class) covers both,
           or present them as separate regimes.
-    \item \textbf{A critical difference diagram for MONSTER}, as for UCR,
-          from \code{results/test}.
-    \item \textbf{Figures.} Error vs.\ wall time; per-batch cost vs.\ rounds,
+    \item \textbf{Figures.} Per-batch cost vs.\ rounds,
           frozen and unfrozen; peak memory vs.\ rows for both models.
     \item \textbf{Bibliography.} Check the entries added for this draft
           (bagging, random forests, extra trees, BDT, NODE, LSH, backfitting,
