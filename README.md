@@ -1001,6 +1001,23 @@ difference (3 models, 26 datasets, α = 0.05) is 0.65.
     # sbatch -p comp --gres=none -c 36 --mem=200G --time=16:00:00 \
     #     scripts/m3_job.sh --serial scripts/m3_runs/et_f<k><a|b>.txt
 
+**Where HashBoost's speed comes from** (`notebooks/monster.ipynb`, from the
+test-fold runs above; no new training). The 8.2x total hides a wide spread.
+Per dataset, HashBoost is faster on 14 of 26, with a median speedup of 1.23:
+from 0.14x on WISDM (XGBoost takes 22 s over five folds) to 30.8x on
+S2Agri-10pc-34. The speedup tracks rows x features x classes, which sets
+XGBoost's cost per round (Spearman 0.87, p = 7e-9), while HashBoost's cost is
+set by its batch budget. A time-matched comparison gives XGBoost exactly
+HashBoost's total training time on each fold, with its round chosen on tune
+error among those it finished. On validation error, HashBoost is then lower on
+19 of 26 datasets and XGBoost's error is 1.35x HashBoost's geometrically.
+That is not significant over all 26 (Wilcoxon p = 0.24), because XGBoost
+finishes within HashBoost's time on the cheap datasets. The gap is in the
+expensive ones: in HashBoost's time, XGBoost reaches 0.27 and 0.29 on the two
+S2Agri subsets (HashBoost 0.028 and 0.019) and 0.117 on TimeSen2Crop
+(0.030). The repaired WISDM fold-3 run supplies the error; its time stays the
+L40S run's, since the rerun was on the RTX 4060.
+
 ### benchmark
 
 This branch compares HashBoost against XGBoost on the five MONSTER datasets
