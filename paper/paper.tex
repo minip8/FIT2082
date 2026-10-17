@@ -51,9 +51,13 @@
     It beats XGBoost on small training sets and trails both on the largest.
     Fewer bits per round and more rounds, chosen by cross-validation over
     datasets, cut its mean error from 0.196 to 0.165. That is significantly
-    ahead of XGBoost (0.210) and still behind ExtraTrees (0.148). On MONSTER
-    default HashBoost is 0.013 to 0.083 behind the best tree ensemble, and fits
-    in seconds where XGBoost takes minutes. Streaming the 975,291-row LenDB
+    ahead of XGBoost (0.210) and still behind ExtraTrees (0.148). On all 26
+    MONSTER datasets, with each model's configuration chosen by the same
+    procedure on validation data and frozen before testing, HashBoost is level
+    with tuned XGBoost on MONSTER's five test folds (error ratio 1.02,
+    Wilcoxon $p = 0.98$) and trains 8.2$\times$ faster in total on the same
+    GPU. On MONSTER's larger training sets both boosters rank significantly
+    ahead of ExtraTrees, the reverse of UCR. Streaming the 975,291-row LenDB
     training pool, HashBoost's peak GPU memory is the same as at 65,536 rows
     (2.6\,GB), while XGBoost's binned matrix grows linearly to 14.6\,GB.
     HashBoost's limit is the number of rounds it can afford, not memory: every
@@ -113,11 +117,14 @@ never needs the training set in one place.
           cost in rounds by the number of estimators. \emph{Round freezing}
           with a per-row cache turns the quadratic cost into a linear one
           (\cref{sec:freezing}).
-    \item An evaluation on five MONSTER datasets against XGBoost, LightGBM and
-          CatBoost (\cref{sec:accuracy}), including streamed runs over whole
-          training pools of up to 1.16 million rows (\cref{sec:scaling}), and
-          on the 112 standard UCR datasets against QUANT's classifier and
-          XGBoost, with Friedman and Nemenyi tests (\cref{sec:ucr}).
+    \item An evaluation on all 26 MONSTER datasets, trained on whole pools of
+          up to 4.65 million rows and scored on MONSTER's five test folds
+          against XGBoost tuned by the same procedure and against QUANT's
+          ExtraTrees (\cref{sec:monster}). Development runs on five MONSTER
+          datasets also compare LightGBM and CatBoost (\cref{sec:accuracy}).
+          On the 112 standard UCR datasets we compare against QUANT's
+          classifier and XGBoost, with Friedman and Nemenyi tests
+          (\cref{sec:ucr}).
     \item A set of negative results. Making individual partitions smarter
           (gain-based selection, feature weighting, richer features) usually
           makes the ensemble \emph{worse}, and run-to-run noise is larger than
@@ -357,9 +364,12 @@ results (\cref{tab:kernels}).
 \label{sec:setup}
 
 \paragraph{Datasets.}
-We use five datasets from MONSTER~\cite{dempster2025monstermonashscalabletime}
-(\cref{tab:datasets}). MONSTER supplies fixed cross-validation folds, and we
-hold out fold 0 as the test set throughout.
+We use all 26 classification datasets in
+MONSTER~\cite{dempster2025monstermonashscalabletime} (\cref{tab:monster-data}).
+Development used five of them (\cref{tab:datasets}). MONSTER supplies five
+fixed cross-validation folds. All development and tuning held out fold 0 and
+never looked at its test rows. The final benchmark (\cref{sec:monster}) holds
+out each fold in turn.
 
 % src: data/*.npy shapes; QUANT feature counts from results/*.json;
 %      PULSAR counts from README "pulsar".
@@ -380,8 +390,52 @@ hold out fold 0 as the test set throughout.
     \end{tabular}
 \end{table}
 
+% src: results/test/fold0/*-99fa5bc.json (split block, transform block)
+\begin{table}[t]
+    \centering
+    \small
+    \caption{The 26 MONSTER datasets. ``Pool'' is the number of rows outside
+        test fold 0, and ``train'' the rows the benchmark trains on after
+        validation and tune slices are taken from the pool. Classes are those
+        present in the labels.}
+    \label{tab:monster-data}
+    \begin{tabular}{lrrrrr}
+        \toprule
+        dataset & series & pool & train & classes & QUANT features \\
+        \midrule
+        AudioMNIST-DS          &    30,000 &    24,000 &    15,808 &  10 &  35,349 \\
+        CornellWhaleChallenge  &    30,000 &    24,000 &    15,808 &   2 &  35,349 \\
+        CrowdSourced           &    12,289 &     9,456 &     5,674 &   2 &  31,542 \\
+        DREAMERA               &   170,246 &   140,638 &   132,446 &   2 &  31,542 \\
+        DREAMERV               &   170,246 &   140,638 &   132,446 &   2 &  31,542 \\
+        FordChallenge          &    36,257 &    29,003 &    20,811 &   2 &  14,130 \\
+        FruitFlies             &    34,518 &    27,614 &    19,422 &   3 &  44,031 \\
+        InsectSound            &    50,000 &    40,000 &    32,768 &  10 &   5,470 \\
+        LakeIce                &   129,280 &   103,424 &    95,232 &   3 &   1,652 \\
+        LenDB                  & 1,244,942 &   983,483 &   975,291 &   2 &  14,940 \\
+        MosquitoSound          &   279,566 &   223,652 &   215,460 &   6 &  33,178 \\
+        Opportunity            &    17,386 &    12,184 &     7,312 &   5 & 117,746 \\
+        PAMAP2                 &    38,856 &    28,961 &    20,769 &  12 &  54,184 \\
+        Pedestrian             &   189,621 &   151,696 &   143,504 &  82 &     212 \\
+        S2Agri-10pc-17         & 5,850,881 & 4,661,858 & 4,653,666 &  17 &   2,120 \\
+        S2Agri-10pc-34         & 5,850,881 & 4,661,858 & 4,653,666 &  29 &   2,120 \\
+        STEW                   &    28,512 &    21,384 &    13,192 &   2 &  31,542 \\
+        Skoda                  &    14,117 &    11,290 &     6,774 &  11 &  62,520 \\
+        TimeSen2Crop           & 1,135,511 &   839,971 &   831,779 &  15 &  30,096 \\
+        Tiselac                &    99,687 &    79,907 &    71,715 &   9 &   2,040 \\
+        Traffic                & 1,460,968 & 1,168,774 & 1,160,582 &   7 &     212 \\
+        UCIActivity            &    10,299 &     7,898 &     4,740 &   6 &  10,440 \\
+        USCActivity            &    56,228 &    43,060 &    34,868 &  12 &   6,252 \\
+        WISDM                  &    17,166 &    11,989 &     7,195 &   6 &   3,126 \\
+        WISDM2                 &   149,034 &    98,094 &    89,902 &   6 &   3,126 \\
+        WhaleSounds            &   105,163 &    84,130 &    75,938 &   8 &  22,105 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
 \paragraph{Splits.}
-Unless stated otherwise, models are trained on 65,536 rows drawn from the pool
+In development (\cref{sec:accuracy,sec:negative,sec:noise}), models are
+trained on 65,536 rows drawn from the pool
 by a fixed shuffle (seed 42). InsectSound uses 32,768, because its pool is too
 small for 65,536 plus the evaluation slices. The next 4,096 rows are the
 validation set and the 4,096 after that are a tune slice, used only for
@@ -389,6 +443,12 @@ decisions made after training (early stopping of the readout). Streamed runs
 (\cref{sec:scaling}) train on the whole pool, and hold the same validation rows
 as the 65,536-row runs they are compared to. Every comparison between HashBoost
 and a tree model on MONSTER uses these same training and validation rows.
+
+The final benchmark (\cref{sec:monster}) trains on the whole pool. From the
+same seed-42 shuffle it takes a validation slice and a tune slice of 4,096
+rows each (a fifth of the pool each where the pool has fewer than 73,728 rows),
+and trains on all the rest. On fold $k$ the pool is everything outside test
+fold $k$, and the slices are drawn from it the same way.
 
 The exploratory Pedestrian sweeps (\cref{tab:ladder,tab:frozen,tab:tau}) and
 the QUANT/PULSAR comparison were run earlier, on a different shuffle (seed 123).
@@ -427,6 +487,12 @@ curve, i.e.\ selected on validation. HashBoost figures are the final error.
 This flatters the trees, but it should still be made consistent, e.g.\ by
 early-stopping on the tune slice.}
 
+In the final MONSTER benchmark the baselines are XGBoost, tuned by the same
+procedure as HashBoost (below), and ExtraTrees with QUANT's own settings (200
+trees, entropy criterion, a tenth of the features per split), trained on the
+same rows. ExtraTrees chooses nothing after training, so it never uses the
+tune slice.
+
 On UCR, where there is nothing to early-stop on, the baselines are
 ExtraTrees with QUANT's own settings (200 trees, entropy criterion, a tenth of
 the features per split)~\cite{dempster2024quant}, on the same QUANT features
@@ -440,14 +506,49 @@ where 50 epochs would mean 50 rounds. On UCR the budget is therefore 800 rounds
 of the same model: batches of at most 4,096 rows, cycled until 800 rounds
 have been added.
 
+\paragraph{Configurations for the MONSTER benchmark.}
+\label{sec:configs}
+Both boosters were tuned the same way, on fold 0's validation error only. We
+screened one change at a time on 10 of the 26 datasets (CrowdSourced, DREAMERA,
+FordChallenge, InsectSound, LenDB, PAMAP2, STEW, Traffic, UCIActivity and
+WISDM), fixed two configurations per model, and ran both on all 26. For each
+dataset, the configuration with the lower fold-0 tune error was then frozen.
+Each frozen configuration was then trained once on each of the five folds and
+scored once on that fold's test rows, at the round its tune error chose.
+
+HashBoost's two configurations both train for up to 5,000 batches of 4,096
+rows, evaluate every 50 batches, stop once their best tune evaluation is 1,000
+batches old, and freeze rounds older than 128 batches:
+\begin{itemize}
+    \item \code{G} draws each of a round's 6 bits as the best of 64 hard-pair
+          candidates by boosting gain (\code{GainSplitter}), with a leaf
+          penalty $\epsilon = 100$ and 8 rounds per batch. It was picked on
+          18 datasets.
+    \item \code{L} uses the default 8-bit hard-pair rounds with $\epsilon = 1$
+          and 16 rounds per batch. It was picked on the 8 where gain
+          selection overfits: the largest pools (LenDB, S2Agri, Traffic,
+          Pedestrian), WhaleSounds and the EEG sets DREAMERA and DREAMERV.
+\end{itemize}
+The pick was the same for all five model seeds on 25 of the 26 datasets.
+XGBoost's screen raised its cap to 5,000 rounds with 100 rounds of patience,
+then varied depth, learning rate, subsampling, L2 regularisation and the
+number of bins. Its two configurations are \code{d4} (depth 4, learning rate
+0.1, picked on 17 datasets) and \code{d8} (depth 8, learning rate 0.05, 64
+bins, picked on 9). At 256 bins, depth 8 ran out of the GPU's 46\,GB on
+several datasets.
+
 \paragraph{Hardware.}
 One NVIDIA RTX 4060 (8\,GB) with 7.9\,GB of host RAM under WSL2. The memory
 limits shaped much of the design. For example, a 3,200-round single model
-peaked near the card's limit.
+peaked near the card's limit. The final MONSTER benchmark ran on Monash's M3
+cluster: each boosting run alone on one NVIDIA L40S (46\,GB), and ExtraTrees
+on CPU nodes with 36 cores and 200\,GB of RAM.
 
 \paragraph{Measurement protocol.}
 \label{sec:noise-protocol}
-We report validation misclassification error. Every variant is compared with a
+The final MONSTER benchmark reports test misclassification error, averaged
+over the five folds, with one run per fold. In development we report
+validation misclassification error. Every variant is compared with a
 baseline rerun \emph{in the same sweep}. Differences under about 0.006 on
 Pedestrian are not treated as results, for the reasons in \cref{sec:noise}.
 Where a change does not alter training (the readout), the comparison is paired
@@ -457,9 +558,167 @@ standard deviation over 3 runs.
 % ==============================================================================
 \section{Results}
 
-\subsection{Accuracy against tree ensembles (RQ1, RQ3)}
+\subsection{MONSTER: the five test folds (RQ1)}
+\label{sec:monster}
+
+\Cref{tab:monster} gives each model's test error on all 26 MONSTER datasets,
+averaged over the five test folds. \Cref{tab:monster-summary} summarises the
+pairwise comparisons, and \cref{fig:monster-scatter} plots them. Every run
+finished. Each restored model reproduced the validation error it had recorded
+at its tune-chosen round, which checks that test error was scored at that
+point.
+
+% src: results/test/fold{0-4}/*-{99fa5bc,580e549}.json; README "m3" > "The
+%      test folds" and "QUANT's ExtraTrees on the same folds". WISDM fold 3's
+%      XGBoost is the --base-score 0.5 rerun.
+\begin{table}[t]
+    \centering
+    \small
+    \setlength{\tabcolsep}{4.5pt}
+    \caption{MONSTER: test error, mean of the five test folds, one run per fold.
+        HashBoost and XGBoost use the configuration each picked on fold 0
+        (\cref{sec:configs}). Times are training seconds summed over the five
+        folds, with QUANT included: HashBoost and XGBoost on one L40S,
+        ExtraTrees on 36 CPU cores. The lowest error in each row is bold.
+        $^\dagger$One fold rerun with a fixed intercept (see text).}
+    \label{tab:monster}
+    \begin{tabular}{lcrcrrrrr}
+        \toprule
+        & \multicolumn{2}{c}{HashBoost} & \multicolumn{2}{c}{XGBoost} & ExtraTrees & \multicolumn{3}{c}{time (s)} \\
+        \cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){7-9}
+        dataset & config & error & config & error & error & HB & XGB & ET \\
+        \midrule
+        AudioMNIST-DS          & G & \textbf{0.0816} & d4 & 0.0884 & 0.1270 & 503 & 885 & 429 \\
+        CornellWhaleChallenge  & G & 0.1250 & d8 & \textbf{0.1233} & 0.1262 & 290 & 424 & 412 \\
+        CrowdSourced           & G & 0.3501 & d4 & 0.3622 & \textbf{0.3396} & 192 & 95 & 119 \\
+        DREAMERA               & L & 0.5161 & d8 & 0.5312 & \textbf{0.4867} & 438 & 1,775 & 4,253 \\
+        DREAMERV               & L & \textbf{0.4036} & d8 & 0.4038 & 0.4179 & 434 & 2,264 & 4,235 \\
+        FordChallenge          & G & 0.0823 & d8 & 0.0731 & \textbf{0.0715} & 196 & 152 & 224 \\
+        FruitFlies             & G & \textbf{0.0458} & d4 & 0.0462 & 0.0619 & 383 & 384 & 670 \\
+        InsectSound            & G & \textbf{0.1872} & d4 & 0.1891 & 0.2268 & 520 & 357 & 148 \\
+        LakeIce                & G & \textbf{0.0018} & d4 & 0.0019 & 0.0024 & 195 & 38 & 116 \\
+        LenDB                  & L & 0.0538 & d4 & \textbf{0.0522} & 0.0551 & 728 & 1,364 & 25,843 \\
+        MosquitoSound          & G & 0.1052 & d4 & \textbf{0.1008} & 0.1596 & 1,855 & 5,054 & 7,366 \\
+        Opportunity            & G & 0.1322 & d4 & \textbf{0.1305} & 0.1394 & 399 & 852 & 761 \\
+        PAMAP2                 & G & \textbf{0.2143} & d4 & 0.2246 & 0.2288 & 277 & 1,025 & 1,013 \\
+        Pedestrian             & L & \textbf{0.1746} & d8 & 0.1772 & 0.2135 & 2,588 & 792 & 61 \\
+        S2Agri-10pc-17         & L & 0.2829 & d8 & 0.2525 & \textbf{0.2521} & 1,463 & 30,068 & 18,291 \\
+        S2Agri-10pc-34         & L & 0.2828 & d8 & \textbf{0.2530} & 0.2638 & 2,013 & 61,933 & 16,151 \\
+        STEW                   & G & \textbf{0.1937} & d4 & 0.1993 & 0.2371 & 325 & 310 & 382 \\
+        Skoda                  & G & 0.0567 & d4 & 0.0610 & \textbf{0.0565} & 354 & 784 & 293 \\
+        TimeSen2Crop           & G & 0.1412 & d4 & \textbf{0.0849} & 0.1808 & 1,926 & 35,655 & 32,910 \\
+        Tiselac                & G & \textbf{0.2139} & d4 & 0.2140 & 0.2172 & 396 & 268 & 115 \\
+        Traffic                & L & 0.2841 & d8 & 0.2939 & \textbf{0.2488} & 846 & 407 & 375 \\
+        UCIActivity            & G & \textbf{0.0521} & d4 & 0.0675 & 0.0855 & 169 & 46 & 21 \\
+        USCActivity            & G & 0.2428 & d4 & \textbf{0.2396} & 0.2751 & 497 & 305 & 188 \\
+        WISDM                  & G & 0.1152 & d4 & \textbf{0.1131}$^\dagger$ & 0.1298 & 161 & 22 & 17 \\
+        WISDM2                 & G & 0.2556 & d4 & \textbf{0.2541} & 0.2614 & 458 & 206 & 297 \\
+        WhaleSounds            & L & 0.3128 & d8 & \textbf{0.2802} & 0.2936 & 612 & 3,633 & 1,856 \\
+        \midrule
+        total &  &  &  &  &  & 18,214 & 149,099 & 116,546 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+% src: scratchpad et_tab.py over the same files; Holm over the three tests
+\begin{table}[t]
+    \centering
+    \small
+    \caption{MONSTER: pairwise comparisons over the 26 datasets. The ratio is
+        the geometric mean of the first model's error over the second's.
+        W/T/L counts the datasets where the first has the lower, equal and
+        higher five-fold mean. ``Clear'' counts those where a 95\% paired-$t$
+        interval over the five per-fold differences excludes zero, either way.
+        $p$ is a two-sided Wilcoxon signed-rank test on the five-fold means,
+        Holm-adjusted over the three comparisons.}
+    \label{tab:monster-summary}
+    \begin{tabular}{lrrrr}
+        \toprule
+        comparison & ratio & W/T/L & clear (W/L) & $p$ \\
+        \midrule
+        HashBoost vs XGBoost     & 1.016 & 14/0/12 & 1/6  & 0.98  \\
+        HashBoost vs ExtraTrees  & 0.904 & 18/0/8  & 9/5  & 0.11  \\
+        XGBoost vs ExtraTrees    & 0.890 & 20/0/6  & 13/3 & 0.030 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/monster_scatter.pdf}
+    \caption{MONSTER: HashBoost's test error against each baseline's, mean of
+        the five folds, one point per dataset. Below the diagonal, HashBoost has
+        the lower error. Labelled points differ by more than 20\%.}
+    \label{fig:monster-scatter}
+\end{figure}
+
+\paragraph{HashBoost and tuned XGBoost are level.}
+HashBoost's error is 1.016 times XGBoost's in geometric mean. It has the lower
+error on 14 datasets and the higher on 12, and on 61 of the 130 dataset-folds.
+The Wilcoxon test finds no difference ($p = 0.98$), and the validation results
+on fold 0 agreed (ratio 1.047, $p = 0.20$). Where one model clearly leads, it
+is usually XGBoost. It does so on six datasets: TimeSen2Crop (HashBoost's error
+is 1.66 times XGBoost's), FordChallenge, WhaleSounds, both S2Agri subsets
+(1.12--1.13) and MosquitoSound (1.04). HashBoost clearly leads only on
+AudioMNIST-DS (0.92). Its leads on UCIActivity, PAMAP2 and CrowdSourced are
+too variable across folds to be clear. The tuning datasets favour HashBoost: it
+is 0.973 times XGBoost's error on the 10 it was screened on ($p = 0.064$,
+unadjusted) and 1.045 times on the other 16 ($p = 0.16$). Both models were
+screened on those 10, but HashBoost was developed on them over many more
+rounds.
+
+\paragraph{Both boosters beat ExtraTrees on MONSTER.}
+The mean ranks are 1.77 for HashBoost, 1.77 for XGBoost and 2.46 for
+ExtraTrees. A Friedman test rejects equal ranks ($p = 0.016$). ExtraTrees is
+0.69 behind both boosters, just beyond the Nemenyi critical difference of 0.65
+at $\alpha = 0.05$. On UCR it was significantly ahead of both
+(\cref{sec:ucr}). Its largest losses are on the big acoustic and sensor pools:
+MosquitoSound (1.52 times HashBoost's error), AudioMNIST-DS, FruitFlies,
+Pedestrian, InsectSound and TimeSen2Crop. It leads both boosters clearly only
+on Traffic (0.88 times HashBoost's error), where its validation error is also
+the lowest. UCR's training sets have a median of 190 series and MONSTER's
+pools have thousands to millions, which is consistent with averaging
+unpruned random trees suiting small training sets and boosting suiting large
+ones.
+
+\paragraph{Cost.}
+On the same GPU, HashBoost trained 8.2 times faster than XGBoost in total:
+18,214\,s against 149,099\,s over the 130 dataset-folds. Without S2Agri,
+where XGBoost spent 92,001\,s, the factor is 3.9 (14,738\,s against
+57,098\,s). On small pools XGBoost is faster, because HashBoost's
+cost per round is mostly fixed: UCIActivity took 169\,s against 46\,s, and
+LakeIce 195\,s against 38\,s. ExtraTrees took 116,546\,s on 36 CPU cores,
+which is not directly comparable.
+
+\paragraph{Test error is about 3.3 times validation error.}
+That holds for all three models (geometric means of 3.33 for HashBoost, 3.23
+for XGBoost and 3.35 for ExtraTrees). The validation and tune slices are random
+draws from the pool, but the test folds differ from it in distribution. On
+DREAMERA, XGBoost's validation error is half HashBoost's (0.071 against 0.135),
+yet both are near 0.5 on test, with HashBoost slightly lower. Every model is
+tuned on the same optimistic slices, so the comparison stays fair, but
+validation gaps on MONSTER do not translate directly into test gaps. Nine
+datasets keep test error close to validation: CornellWhaleChallenge,
+FruitFlies, InsectSound, LakeIce, MosquitoSound, Pedestrian, Skoda, Traffic
+and WhaleSounds.
+
+\paragraph{A failure in XGBoost's intercept.}
+WISDM's test fold 3 holds every series of two of its six classes, so that
+fold's training pool lacks them. XGBoost~3.4 estimates each class's starting
+score from the training labels, and here it produced $+3.4$ and $+4.8$ for the
+two absent classes and $-8.1$ for the two commonest. Training error then swung
+between 0.57 and 0.91 from the first round and never fell, giving a test error
+of 0.683. Fixing the intercept at 0.5, XGBoost's default before version 2.0,
+gives 0.178 against HashBoost's 0.174. \Cref{tab:monster} uses the repaired
+run. As run, the HashBoost--XGBoost ratio is 0.992 ($p = 0.71$). No other run
+showed the pattern. HashBoost starts every class at a uniform prior and
+ExtraTrees predicts only the classes it was trained on, so neither is affected.
+
+\subsection{Development on five datasets}
 \label{sec:accuracy}
 
+The results in this subsection come from development, before the benchmark
+above. They are validation error on fold 0 at 65,536 training rows.
 \Cref{tab:baselines} compares \emph{default} HashBoost (a single model, 50
 epochs: 800 rounds, or 400 on InsectSound's 32,768 rows) with the tree
 ensembles, all on the same rows.
@@ -498,12 +757,11 @@ HashBoost and the other two tree models.
     \end{tabular}
 \end{table}
 
-\todo{Still needed for \cref{tab:baselines}: (a) LightGBM and CatBoost on InsectSound
-and LenDB, (b) tree timings measured the same way as HashBoost's, (c) several
-runs per cell (Pedestrian's two runs of default HashBoost read 0.2253 and
-0.2356), (d) the trees early-stopped on the tune slice rather than selected on
-validation, and (e) test-fold error, evaluated once after everything is
-frozen. See \cref{sec:todo}.}
+These are default settings on one split, with the trees selected on
+validation. \Cref{sec:monster} replaces them with tuned configurations of
+both boosters, whole training pools and test folds. The gap here closed
+mainly through capacity (more rounds per batch), the full budget, and the
+regularised gain-selected rounds of \code{G}.
 
 \paragraph{Closing the gap on Pedestrian.}
 Pedestrian received the most tuning. \Cref{tab:ladder} shows the path from the
@@ -841,10 +1099,14 @@ models trained on 65,536 rows, in 139--154\,s. In these streamed runs the model
 was only 14--19\% of wall time on Traffic and under 4\% on LenDB. Most of the
 time went to the QUANT transform and to reading the memory-mapped input.
 
-\todo{The decisive RQ2 experiment: whole-pool LenDB with freezing and enough
-epochs to stop underfitting (e.g.\ 20--50 epochs, 2-epoch window). Does
-HashBoost then beat both its own 65,536-row run and XGBoost at 65,536 rows,
-within the same 2.6\,GB?}
+Given more rounds, the full pool pays on LenDB too. Configuration \code{L}
+(16 rounds per batch, a 128-batch window) reached a validation error of
+\pmsd{0.0428}{0.0018} over five seeds on the whole pool. That beats its own
+65,536-row run (0.0532) and whole-pool XGBoost at its defaults (0.0471). Its
+peak GPU memory was 3.4--4.9\,GB across the five test folds, larger than the
+default's 2.6\,GB because each batch adds 16 rounds. Tuned XGBoost peaked at
+17.1--17.8\,GB on the same pools. On the test folds the two are close (0.0538
+against 0.0522).
 
 \todo{A figure: validation error against wall time (or rounds) for HashBoost
 and XGBoost at 65k and full pool. The data is in results/LenDB-full-*.json and
@@ -863,7 +1125,13 @@ row subsampling (0.2585 at half), statistic decay, leaf L2, oblique predicates
 (0.2277, consistently a little worse), and a hard top-25\% feature filter
 (0.3420). The randomness of the predicates appears to be what makes the
 rounds diverse enough to add up, as in extremely randomised
-trees~\cite{geurts2006extremely}.
+trees~\cite{geurts2006extremely}. The exception came later, on whole MONSTER
+pools. There, gain selection over 64 candidates, combined with 6-bit rounds
+and a heavy leaf penalty ($\epsilon = 100$), was the largest single gain in
+the screen. It cut CrowdSourced's validation error from 0.042 to 0.006 and
+FordChallenge's from 0.105 to 0.062, though it raised DREAMERA's. This
+became configuration \code{G} (\cref{sec:configs}). The penalty appears to be
+what lets gain-chosen rounds generalise.
 
 \paragraph{Feature weighting is dataset-specific.}
 Drawing features in proportion to a mix of uniform and ANOVA-$F$ scores reduced
@@ -941,7 +1209,13 @@ HashBoost is statistically level with default XGBoost, and it is clearly ahead
 on training sets of a few hundred rows or fewer. It is not level with the
 strongest classifier for the same features: QUANT's ExtraTrees ranks
 significantly higher and has the lower error on 96 of the 112 datasets. On
-MONSTER, default HashBoost is 0.013--0.083 behind the best tuned tree model.
+MONSTER, the picture changes. With both boosters tuned the same way and
+scored on the five test folds, HashBoost is level with XGBoost across all 26
+datasets ($p = 0.98$) and trains 8.2 times faster. Both rank significantly
+ahead of ExtraTrees. Which classifier suits QUANT's features therefore
+depends on scale: on small training sets an average of random trees wins,
+and on large ones a booster wins, whether its weak learner is a tree or a
+global partition.
 On UCR, two settings close most of the gap to ExtraTrees: fewer bits, so that
 small training sets fill their buckets, and more rounds. With two bits and
 3,200 rounds, chosen by cross-validation over datasets, HashBoost is
@@ -949,8 +1223,8 @@ significantly ahead of XGBoost and 0.017 behind ExtraTrees in mean error,
 though still significantly behind it.
 On Pedestrian, a bagged ensemble with a refitted readout reached XGBoost's
 validation error, though only on the earlier split. So the tree can be
-replaced at a cost in accuracy, and how large that cost is depends on the
-tuning HashBoost gets. So far that has been one dataset's worth.
+replaced, and on MONSTER, given the same tuning effort as XGBoost, at no
+cost in accuracy.
 
 \paragraph{Why does randomness work?}
 The negative results point in one direction. Every change that made a single
@@ -970,11 +1244,17 @@ run is dominated by the feature transform and I/O, not the model.
 
 \paragraph{Limitations.}
 \begin{itemize}
-    \item The MONSTER results are validation error from a single split, and
-          every design choice was made on that validation set.
-          \todo{test-fold numbers} The UCR results are test error, but from
-          the default split only, one run each, where the bake-off averages
-          30 resamples.
+    \item The MONSTER benchmark is one run per test fold. Over five model
+          seeds on fold 0, \code{auto(G,L)}'s standard deviation was 0.0002 to
+          0.0024 on most datasets. Both models' configurations were chosen on
+          10 of the 26 datasets, where HashBoost had also been developed for
+          longer. It does better there (0.973 against 1.045 on the other 16).
+          The UCR results are test error, but from the default split only,
+          one run each, where the bake-off averages 30 resamples.
+    \item On MONSTER, validation error underestimates test error about
+          3.3-fold, because the validation and tune slices are random draws
+          from a pool whose test fold differs from it. Choices made on
+          validation, for both models, may not be the best on test.
     \item The Pedestrian exploration was run on an earlier split, so its
           comparison with XGBoost crosses splits (\cref{sec:setup}).
     \item On UCR every model runs at fixed settings, and the baselines are at
@@ -982,10 +1262,12 @@ run is dominated by the feature transform and I/O, not the model.
           bits-and-rounds grid is scored on test sets. The cross-validated
           choice over datasets never reads the test set it is scored on, but
           it still reads the other half's.
-    \item The MONSTER tree baselines use one fixed configuration each and were
-          not tuned. Their early stopping selects on validation, which favours
-          them.
-    \item All timings come from one consumer GPU under WSL2.
+    \item The final MONSTER benchmark compares against XGBoost and
+          ExtraTrees only. LightGBM and CatBoost appear only in the five-dataset
+          development runs, at their defaults.
+    \item Development timings come from one consumer GPU under WSL2, and the
+          MONSTER benchmark's from an L40S. ExtraTrees ran on CPUs, so its
+          time is not directly comparable.
 \end{itemize}
 
 \paragraph{Future work.}
@@ -1008,9 +1290,11 @@ no split search and never holds the training set. At its defaults it is
 level with default XGBoost across the 112 UCR datasets. With fewer bits per
 round, so that small training sets fill their buckets, and more rounds, it is
 significantly ahead of XGBoost and within 0.017 of QUANT's ExtraTrees in mean
-error, though still significantly behind it. On MONSTER it trails the best
-tuned tree ensemble by 0.01 to 0.08. It fits in seconds, and
-its memory use is flat from 65,536 to nearly a million rows. The cost that
+error, though still significantly behind it. On all 26 MONSTER datasets,
+scored on the five test folds, it is level with XGBoost tuned by the same
+procedure, trains 8.2 times faster on the same GPU, and, like XGBoost, ranks
+significantly ahead of ExtraTrees. Its memory use does not grow with the
+training set, so it trains on whole pools of millions of rows. The cost that
 limits it is the number of rounds, which round freezing reduces from quadratic
 to linear.
 
@@ -1022,22 +1306,14 @@ to linear.
 \textcolor{red}{Delete this section before submission.}
 
 \begin{enumerate}
-    \item \textbf{More runs.} Every new number here is one run: rerun the
-          MONSTER defaults (Pedestrian's two runs differ by 0.010) and the UCR
-          112 with several seeds or resamples.
-    \item \textbf{Freeze one configuration.} On UCR, two bits and 3,200
-          rounds beat the default everywhere below 1,000 training rows. Four
-          bits won above that, where MONSTER's defaults were tuned. Decide
-          whether the final benchmark uses one width or a width derived from
-          rows per class, and check the choice on MONSTER.
-    \item \textbf{Consolidated benchmark.} Five datasets $\times$ \{HashBoost
-          default, HashBoost final, XGBoost, LightGBM, CatBoost\}. Report error,
-          wall time and peak GPU memory, with several runs per cell and the
-          same early-stopping rule for all models (tune slice). Evaluate the
-          test fold once, at the end. Replace
-          \cref{tab:baselines}.
-    \item \textbf{Whole-pool LenDB with freezing} run long enough to stop
-          underfitting (\cref{sec:scaling}).
+    \item \textbf{More runs on UCR.} The UCR 112 numbers are one run on the
+          default split; the bake-off uses 30 resamples.
+    \item \textbf{UCR and MONSTER configurations.} UCR's best setting (two
+          bits, 3,200 rounds) and MONSTER's (\code{G}/\code{L}) differ.
+          Say whether one rule (e.g.\ a width from rows per class) covers both,
+          or present them as separate regimes.
+    \item \textbf{A critical difference diagram for MONSTER}, as for UCR,
+          from \code{results/test}.
     \item \textbf{Figures.} Error vs.\ wall time; per-batch cost vs.\ rounds,
           frozen and unfrozen; peak memory vs.\ rows for both models.
     \item \textbf{Bibliography.} Check the entries added for this draft
