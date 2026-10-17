@@ -925,7 +925,81 @@ test is on the 26 five-fold means:
   against 38 s and Pedestrian 2,588 s against 792 s.
 
     uv run python scripts/m3_runs/test_runs.py   # writes test_f{0-4}{a,b}.txt
-    # each line: stream_full.py ... --fold k --test --output-dir results/test/fold{k}
+    # each line: stream_full.py ... --fold k --test --out results/test/fold{k}
+
+**QUANT's ExtraTrees on the same folds** (`580e549`, jobs 61090973-61090982,
+CPU nodes on `comp`, 36 cores each; `scripts/m3_runs/et_runs.py`).
+ExtraTrees beat both boosters on UCR (README `ucr`), so it joins the test
+comparison at QUANT's own settings: 200 trees, entropy, `max_features` 0.1.
+`--model extratrees` holds the pool's features in host RAM (TimeSen2Crop's
+are 100 GB) and fits once on the boosters' training rows. It chooses
+nothing, so it never uses the tune slice. All 130 runs finished. HashBoost and
+XGBoost are the five-fold means above, with WISDM's fold 3 repaired. Ahead
+means a 95% paired-t interval over the five folds excludes 0, and time is
+ExtraTrees' QUANT and fit seconds over the five folds:
+
+| dataset | HashBoost | XGBoost | ExtraTrees | ET / HB | | ET / XGB | | ET time |
+| --- | ---: | ---: | ---: | ---: | --- | ---: | --- | ---: |
+| AudioMNIST-DS | 0.0816 | 0.0884 | 0.1270 | 1.56 | HB ahead | 1.44 | XGB ahead | 429s |
+| CornellWhaleChallenge | 0.1250 | 0.1233 | 0.1262 | 1.01 |  | 1.02 |  | 412s |
+| CrowdSourced | 0.3501 | 0.3622 | 0.3396 | 0.97 |  | 0.94 |  | 119s |
+| DREAMERA | 0.5161 | 0.5312 | 0.4867 | 0.94 |  | 0.92 | ET ahead | 4,253s |
+| DREAMERV | 0.4036 | 0.4038 | 0.4179 | 1.04 |  | 1.04 |  | 4,235s |
+| FordChallenge | 0.0823 | 0.0731 | 0.0715 | 0.87 | ET ahead | 0.98 |  | 224s |
+| FruitFlies | 0.0458 | 0.0462 | 0.0619 | 1.35 | HB ahead | 1.34 | XGB ahead | 670s |
+| InsectSound | 0.1872 | 0.1891 | 0.2268 | 1.21 | HB ahead | 1.20 | XGB ahead | 148s |
+| LakeIce | 0.0018 | 0.0019 | 0.0024 | 1.31 | HB ahead | 1.24 | XGB ahead | 116s |
+| LenDB | 0.0538 | 0.0522 | 0.0551 | 1.02 |  | 1.05 | XGB ahead | 25,843s |
+| MosquitoSound | 0.1052 | 0.1008 | 0.1596 | 1.52 | HB ahead | 1.58 | XGB ahead | 7,366s |
+| Opportunity | 0.1322 | 0.1305 | 0.1394 | 1.06 |  | 1.07 |  | 761s |
+| PAMAP2 | 0.2143 | 0.2246 | 0.2288 | 1.07 |  | 1.02 |  | 1,013s |
+| Pedestrian | 0.1746 | 0.1772 | 0.2135 | 1.22 | HB ahead | 1.21 | XGB ahead | 61s |
+| S2Agri-10pc-17 | 0.2829 | 0.2525 | 0.2521 | 0.89 | ET ahead | 1.00 |  | 18,291s |
+| S2Agri-10pc-34 | 0.2828 | 0.2530 | 0.2638 | 0.93 | ET ahead | 1.04 | XGB ahead | 16,151s |
+| STEW | 0.1937 | 0.1993 | 0.2371 | 1.22 | HB ahead | 1.19 | XGB ahead | 382s |
+| Skoda | 0.0567 | 0.0610 | 0.0565 | 1.00 |  | 0.93 | ET ahead | 293s |
+| TimeSen2Crop | 0.1412 | 0.0849 | 0.1808 | 1.28 | HB ahead | 2.13 | XGB ahead | 32,910s |
+| Tiselac | 0.2139 | 0.2140 | 0.2172 | 1.02 |  | 1.01 |  | 115s |
+| Traffic | 0.2841 | 0.2939 | 0.2488 | 0.88 | ET ahead | 0.85 | ET ahead | 375s |
+| UCIActivity | 0.0521 | 0.0675 | 0.0855 | 1.64 |  | 1.27 | XGB ahead | 21s |
+| USCActivity | 0.2428 | 0.2396 | 0.2751 | 1.13 |  | 1.15 |  | 188s |
+| WISDM | 0.1152 | 0.1131 | 0.1298 | 1.13 | HB ahead | 1.15 | XGB ahead | 17s |
+| WISDM2 | 0.2556 | 0.2541 | 0.2614 | 1.02 |  | 1.03 |  | 297s |
+| WhaleSounds | 0.3128 | 0.2802 | 0.2936 | 0.94 | ET ahead | 1.05 | XGB ahead | 1,856s |
+
+| | geo ratio (ET / booster) | ET ahead / level / behind | ET lower (raw) | Wilcoxon p |
+| --- | ---: | ---: | ---: | ---: |
+| ExtraTrees against HashBoost | 1.106 | 5 / 12 / 9 | 8 / 26 | 0.056 |
+| ExtraTrees against XGBoost | 1.124 | 3 / 10 / 13 | 6 / 26 | 0.010 |
+
+Mean ranks over the 26 datasets are HashBoost 1.77, XGBoost 1.77 and
+ExtraTrees 2.46. The Friedman p is 0.016 and the Nemenyi critical
+difference (3 models, 26 datasets, α = 0.05) is 0.65.
+
+* **On MONSTER, ExtraTrees is behind both boosters, which reverses UCR.**
+  Its error is 1.11x HashBoost's and 1.12x XGBoost's geometrically, and it
+  ranks last by 0.69, just past the critical difference. HashBoost and
+  XGBoost tie on rank. On UCR's small training sets, averaging 200
+  unpruned random trees beat boosting. With MONSTER's thousands to millions
+  of rows, the boosters pull ahead. Its worst losses are on the large
+  acoustic and sensor pools: MosquitoSound (1.52-1.58x), AudioMNIST-DS,
+  FruitFlies, LakeIce, Pedestrian, InsectSound, STEW and TimeSen2Crop (2.13x
+  XGBoost's).
+* **It wins on a few datasets with shifted test folds.** It is ahead of both
+  boosters on Traffic (0.85-0.88x), and ahead of HashBoost on FordChallenge,
+  both S2Agri subsets and WhaleSounds. It is also ahead of XGBoost on
+  DREAMERA and Skoda. On Traffic its validation error (0.247) is also the
+  lowest of the three, so this is accuracy, not just robustness to the fold.
+* **Its validation error is optimistic by the same 3.4x as the boosters'.**
+* **Cost: 116,546 s on 36 CPU cores**, against HashBoost's 18,214 s and
+  XGBoost's 149,099 s, both on one L40S. The hardware differs, so this is
+  not a like-for-like speed comparison. The fit dominates: reading the
+  series and running QUANT on the CPU took 5,579 s of the 116,546. TimeSen2Crop (32,910 s), LenDB (25,843 s) and
+  S2Agri (34,442 s for the two) are 80% of the total.
+
+    uv run python scripts/m3_runs/et_runs.py   # writes et_f{0-4}{a,b}.txt
+    # sbatch -p comp --gres=none -c 36 --mem=200G --time=16:00:00 \
+    #     scripts/m3_job.sh --serial scripts/m3_runs/et_f<k><a|b>.txt
 
 ### benchmark
 
