@@ -657,10 +657,24 @@ and 58\,GB after QUANT) through both models on the RTX 4060, on the same
 validation rows as a 65,536-row run. HashBoost's peak GPU memory was the same
 at both sizes, 2,572\,MB, because each batch is folded into the tables and
 freed. XGBoost's binned matrix is one byte per row and feature and grows
-linearly: 14.6\,GB at the full pool, which it paged from disk every round at
+linearly (\cref{fig:scaling}, right): 14.6\,GB at the full pool, which it paged from disk every round at
 116\,s per round against 0.68\,s at 65,536 rows. On the L40S in the MONSTER
 benchmark, tuned XGBoost held LenDB's matrix on the card at 17.1--17.8\,GB,
 against 3.4--4.9\,GB for HashBoost's \code{L}.
+
+% src: notebooks/streaming.ipynb, section 6
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures/scaling.pdf}
+    \caption{Left: HashBoost's model time per batch against rounds on a
+        whole-pool Traffic stream (1.16 million rows, one round per batch,
+        RTX 4060), unfrozen and with rounds older than one or two epochs
+        frozen. Right: what each model needs available as LenDB's training
+        pool grows. HashBoost's peak GPU memory is measured; XGBoost's binned
+        matrix is measured on disk at 245,760 and 975,291 rows and derived
+        from the same bytes per element at 65,536.}
+    \label{fig:scaling}
+\end{figure}
 
 \paragraph{More data needs more rounds.}
 With the default single round per batch, the whole-pool model was
@@ -673,7 +687,8 @@ rounds, not memory, and the quadratic cost is what makes rounds expensive.
 
 \paragraph{Freezing makes the cost linear.}
 Per-batch cost grows with the number of rounds: on a streamed Traffic run it
-rose from 2\,ms to 14.5\,ms over 2,840 rounds, and 1,600 rounds on Pedestrian
+rose from 2\,ms to 14.5\,ms over 2,840 rounds, while a window of one or two
+epochs' rounds levels it off (\cref{fig:scaling}, left), and 1,600 rounds on Pedestrian
 took 37.5\,s against 10.5\,s for 800. \Cref{tab:frozen} shows freezing on
 Pedestrian. A window of ten epochs' rounds matches 1,600 unfrozen rounds'
 accuracy in 2.4 times less time. The window matters: two epochs cost up to
@@ -780,20 +795,6 @@ test folds, it is level with XGBoost tuned by the same procedure and trains
 ExtraTrees. On the small UCR datasets, with fewer bits and more rounds, it is
 significantly ahead of XGBoost and behind ExtraTrees. What limits it is the
 number of rounds it can afford, which round freezing makes linear in cost.
-
-% ==============================================================================
-\appendix
-\section{Remaining work before submission}
-\label{sec:todo}
-
-\textcolor{red}{Delete this section before submission.}
-
-\begin{enumerate}
-    \item \textbf{Bibliography.} Check the entries added for this draft
-          (random forests, extra trees, BDT, NODE, LSH, backfitting).
-    \item \textbf{Figures (optional).} Per-batch cost against rounds, frozen
-          and unfrozen; peak memory against rows for both models.
-\end{enumerate}
 
 \clearpage
 \bibliographystyle{ieeetr}
