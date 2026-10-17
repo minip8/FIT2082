@@ -1082,6 +1082,15 @@ def run_xgboost(
         "early_stopping_rounds": args.early_stopping_rounds,
     }
 
+    # XGBoost (since 2.0) estimates each class's starting score from the
+    # training labels. A training pool missing a class gets nonsense: WISDM's
+    # fold 3 holds out every row of classes 2 and 3, the estimate put +3.4 and
+    # +4.8 on them and -8.1 on the commonest two, and training error swung
+    # between 0.57 and 0.91 from round 0 on. Fixing it (0.5, the pre-2.0
+    # default) trains normally.
+    if args.base_score is not None:
+        params["base_score"] = args.base_score
+
     cache = Path(args.cache_dir)
     cache.mkdir(parents=True, exist_ok=True)
 
@@ -1432,6 +1441,13 @@ def main() -> None:
     parser.add_argument("--colsample-bynode", type=float, default=1.0)
     parser.add_argument("--min-child-weight", type=float, default=1.0)
     parser.add_argument("--reg-lambda", type=float, default=1.0)
+    parser.add_argument(
+        "--base-score",
+        type=float,
+        default=None,
+        help="every class's starting score (default: xgboost estimates it from "
+        "the labels, which fails when the training pool misses a class)",
+    )
     parser.add_argument(
         "--cache-dir",
         default=None,

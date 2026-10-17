@@ -819,7 +819,10 @@ fold 0 (seed 42). Each model is scored once on the held-out fold at its
 tune-chosen round. HashBoost restores a snapshot taken at its best tune
 evaluation; XGBoost predicts with `iteration_range` up to `best_iteration`.
 Every restored model reproduced its recorded validation error (XGBoost's to
-float32 rounding, at most 4e-9).
+float32 rounding, at most 4e-9). XGBoost failed on one fold, WISDM's fold 3,
+because of its intercept estimate (below). The tables use that fold rerun with
+`--base-score 0.5` (locally, on the RTX 4060), with the as-run numbers beside
+them.
 
 Test error is the mean over the five folds, from one seed per fold. Ahead
 means a 95% paired-t interval over the five per-fold differences excludes 0.
@@ -851,7 +854,7 @@ the training seconds summed over the five folds:
 | Traffic | `L` / `d8_bin64` | 0.2841 | 0.2939 | 0.97 |  | 0.2815 / 0.2935 | 846s / 407s |
 | UCIActivity | `G` / `d4_lr0.1` | 0.0521 | 0.0675 | 0.77 |  | 0.0096 / 0.0170 | 169s / 46s |
 | USCActivity | `G` / `d4_lr0.1` | 0.2428 | 0.2396 | 1.01 |  | 0.0750 / 0.0710 | 497s / 305s |
-| WISDM | `G` / `d4_lr0.1` | 0.1152 | 0.2142 | 0.54 | (fold 3, below) | 0.0099 / 0.1258 | 161s / 22s |
+| WISDM | `G` / `d4_lr0.1` | 0.1152 | 0.1131 (as run 0.2142) | 1.02 |  | 0.0099 / 0.0129 | 161s / 22s |
 | WISDM2 | `G` / `d4_lr0.1` | 0.2556 | 0.2541 | 1.01 |  | 0.0274 / 0.0180 | 458s / 206s |
 | WhaleSounds | `L` / `d8_bin64` | 0.3128 | 0.2802 | 1.12 | XGB ahead | 0.3139 / 0.2807 | 612s / 3,633s |
 
@@ -860,29 +863,29 @@ test is on the 26 five-fold means:
 
 | datasets | geo ratio | HB ahead / level / behind | HB lower (raw) | Wilcoxon p | HashBoost time | XGBoost time |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| all 26 | 0.992 | 1 / 19 / 6 | 15 / 26 | 0.71 | 18,214s | 149,099s |
-| all 26, WISDM without fold 3 | 1.017 | | 14 / 26 | 0.96 | | |
-| without S2Agri (24) | 0.982 | 1 / 19 / 4 | 15 / 24 | 0.28 | 14,738s | 57,098s |
-| screened 10 | 0.913 | 0 / 9 / 1 | 8 / 10 | 0.020 | 3,850s | 5,553s |
+| all 26 | 1.016 | 1 / 19 / 6 | 14 / 26 | 0.98 | 18,214s | 149,099s |
+| all 26, WISDM fold 3 as run | 0.992 | 1 / 19 / 6 | 15 / 26 | 0.71 | | |
+| without S2Agri (24) | 1.008 | 1 / 19 / 4 | 14 / 24 | 0.51 | 14,738s | 57,098s |
+| screened 10 | 0.973 | 0 / 9 / 1 | 7 / 10 | 0.064 | 3,850s | 5,553s |
 | held-out 16 | 1.045 | 1 / 10 / 5 | 7 / 16 | 0.16 | 14,364s | 143,546s |
 
 ![HashBoost against XGBoost, MONSTER test folds](paper/figures/monster_test_scatter.png)
 
 * **On the test folds the two models are level.** HashBoost's error is
-  0.992x XGBoost's geometrically, or 1.017x without the failed WISDM fold.
-  The Wilcoxon p is 0.71 (0.96 without that fold), and HashBoost has the lower
-  error on 15 of 26 datasets and on 61 of 130 dataset-folds. Validation said
+  1.016x XGBoost's geometrically, with Wilcoxon p = 0.98, and HashBoost has the
+  lower error on 14 of 26 datasets and on 61 of 130 dataset-folds. With
+  XGBoost's failed WISDM fold counted as it ran, it is 0.992x (p = 0.71). Validation said
   much the same (1.047x in round 3 above): tuned XGBoost is no better than
   HashBoost across MONSTER, and HashBoost is no better than it.
 * **Where one model leads, it is mostly XGBoost.** Six datasets clear the
   five-fold interval for XGBoost: TimeSen2Crop (1.66x), FordChallenge,
   WhaleSounds, both S2Agri subsets (1.12-1.13x) and MosquitoSound (1.04x).
   Only AudioMNIST-DS (0.92x) clears it for HashBoost. HashBoost's leads on
-  UCIActivity, PAMAP2, CrowdSourced and WISDM are real on most folds but too
+  UCIActivity, PAMAP2 and CrowdSourced are real on most folds but too
   variable across folds to clear five-fold intervals.
-* **The screened-10 result is selection, not ability.** HashBoost is
-  ahead there (0.913x, p = 0.020) and behind on the held-out 16 (1.045x). That
-  is the screen's optimism showing up again. Both models' configurations were
+* **The screened 10 still flatter HashBoost.** It is ahead there (0.973x,
+  p = 0.064; as run, with WISDM's failed fold, 0.913x and p = 0.020) and behind
+  on the held-out 16 (1.045x). That is the screen's optimism showing up again. Both models' configurations were
   chosen on those 10, but HashBoost's came out of many more rounds of
   development there.
 * **DREAMERA and DREAMERV's 2x deficit was a validation artefact.** XGBoost's
@@ -897,13 +900,24 @@ test is on the 26 five-fold means:
   comparison fair. Nine datasets keep test close to validation: Pedestrian,
   InsectSound, LakeIce, FruitFlies, Skoda, MosquitoSound,
   CornellWhaleChallenge, WhaleSounds and Traffic.
-* **XGBoost diverged on WISDM fold 3.** `d4_lr0.1`'s training error swings
-  between 0.57 and 0.91 from round 0 and never falls, so tune error is
-  lowest at round 0 and its test error is 0.683. HashBoost's is 0.174. That
-  pattern points to a non-finite or extreme feature in that fold's QUANT
-  output, not to an inaccuracy XGBoost would also show on clean data, but this
-  has not been checked. The table counts the fold as it ran; the second row of
-  the summary drops it for both models.
+* **XGBoost failed on WISDM fold 3 because of its intercept estimate, not the
+  features.** As run, `d4_lr0.1`'s training error swung between 0.57 and 0.91
+  from round 0 and never fell, so tune chose round 0 and test error was 0.683
+  (HashBoost's is 0.174). It reproduces exactly on the RTX 4060. The QUANT
+  features are clean on every fold: all finite, largest absolute value about
+  1,210. What sets fold 3 apart is that it holds out every row of classes 2
+  and 3, so the training pool has none. XGBoost (3.4.1; since 2.0) estimates
+  each class's starting score from the training labels, and here it produced
+  +3.4 and +4.8 for the two classes, which held 0 rows, and -8.1 for classes
+  4 and 5, which held 53%. With `--base-score 0.5` (XGBoost's fixed default
+  before 2.0, an opt-in flag; earlier runs are unchanged) fold 3 trains
+  normally and reaches 0.178 test error at round 195. On fold 1, which has all
+  classes, the same flag moves test error from 0.061 to 0.066, within one-run
+  noise. No other run of the 130 shows the pattern. The check was the training
+  curve: none of the others has training error rising by 0.01 or more between
+  rounds, staying above half its round-0 value, or stopping before round 20.
+  HashBoost starts every class at the uniform log(1/k), estimating nothing,
+  and trains normally on the same pool.
 * **HashBoost trained 8.2x faster**: 18,214 s against 149,099 s over the five
   folds, or 3.9x (14,738 s against 57,098 s) without S2Agri, where XGBoost
   spends 92,001 s. On small pools XGBoost is faster, because HashBoost's fixed
