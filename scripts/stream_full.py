@@ -26,6 +26,11 @@ worth having:
   Streaming only changes where that matrix lives -- `ExtMemQuantileDMatrix`
   writes the ellpack to disk once and pages it back on each round.
 
+`--model extratrees` adds QUANT's own classifier (`fit2082.ucr.EXTRATREES`)
+as a third point of reference. It is the exception: sklearn has neither a
+streaming nor a GPU path, so the whole pool's features are materialised in
+host RAM and it runs on the CPU, on a node with the memory for it.
+
 The validation and test rows are held byte-identical to the fixed-size run on
 the same dataset, so the curves here are directly comparable to
 `results/<dataset>-*.json`; the training pool is everything else. That hinges on
@@ -100,6 +105,7 @@ from fit2082.results import (
     host_rss_mb,
     write_results,
 )
+from fit2082.ucr import EXTRATREES
 
 # == split =====================================================================
 
@@ -1257,6 +1263,112 @@ def run_xgboost(
     return result
 
 
+# == extratrees ================================================================
+
+
+def run_extratrees(
+    stream: RawStream,
+    transform: Transform,
+    holdouts: dict[str, tuple[torch.Tensor, torch.Tensor]],
+    num_classes: int,
+    args: argparse.Namespace,
+    device: str,
+    checkpoint: Callable[[dict[str, Any]], None],
+    test: np.ndarray | None = None,
+) -> dict[str, Any]:
+    """QUANT's ExtraTrees on the whole pool, its features held in host RAM.
+
+    It fits at QUANT's fixed settings and chooses nothing afterwards, so
+    "tuned" is plain validation error, and the tune slice is reported
+    but never used. That gives it the boosters' training rows exactly, where
+    UCR's ExtraTrees had no validation split at all.
+    """
+
+    from sklearn.ensemble import ExtraTreesClassifier
+
+    build_wall, build_cpu = time.perf_counter(), time.process_time()
+
+    # sorted, so that the memmap reads run forwards; the order of a forest's
+    # training rows does not matter
+    rows = np.sort(stream.indices)
+    Z: np.ndarray | None = None
+    y = np.empty(rows.shape[0], dtype=np.int64)
+
+    with torch.no_grad():
+        for start in range(0, rows.shape[0], stream.batch_size):
+            raw, labels = stream.gather(rows[start : start + stream.batch_size])
+            batch = features(raw, transform, device).cpu().numpy()
+            if Z is None:
+                Z = np.empty((rows.shape[0], batch.shape[1]), dtype=np.float32)
+            Z[start : start + batch.shape[0]] = batch
+            y[start : start + batch.shape[0]] = labels
+
+    assert Z is not None
+
+    build = {
+        "phase": "build",
+        "wall_s": time.perf_counter() - build_wall,
+        "cpu_s": time.process_time() - build_cpu,
+    }
+
+    # the CPUs Slurm gave this job, where n_jobs=-1 could mean the whole node
+    jobs = len(os.sched_getaffinity(0))
+    params = {**EXTRATREES, "n_jobs": jobs, "random_state": args.model_seed}
+
+    print(
+        f"  features {Z.shape} ({Z.nbytes / 1e9:.1f} GB) built in "
+        f"{build['wall_s']:.0f}s; fitting on {jobs} CPUs",
+        flush=True,
+    )
+
+    train_wall, train_cpu = time.perf_counter(), time.process_time()
+    model = ExtraTreesClassifier(**params).fit(Z, y)
+    train = {
+        "phase": "train",
+        "wall_s": time.perf_counter() - train_wall,
+        "cpu_s": time.process_time() - train_cpu,
+    }
+
+    del Z
+
+    def predict(X: torch.Tensor) -> torch.Tensor:
+        # sklearn maps back through `classes_`, so a class the pool lacks
+        # (WISDM's fold 3) is simply never predicted
+        return torch.as_tensor(model.predict(X.cpu().numpy()), device=X.device)
+
+    errors = {
+        name: (predict(X) != Y).to(torch.float32).mean().item()
+        for name, (X, Y) in holdouts.items()
+    }
+    trees = params["n_estimators"]
+
+    print(
+        f"  {trees} trees in {train['wall_s']:.0f}s  "
+        + " ".join(f"{k}={v:.4f}" for k, v in errors.items()),
+        flush=True,
+    )
+
+    result = {
+        "x_name": "trees",
+        "params": params,
+        "timings": [build, train],
+        "memory": {"host_peak_rss_mb": host_peak_rss_mb(), "streamed": False},
+        "n_tr": int(rows.shape[0]),
+        "nodes": int(sum(e.tree_.node_count for e in model.estimators_)),
+        "results": {
+            name: {"merror": curve([err], [trees])} for name, err in errors.items()
+        },
+        "early_stopping": "none",
+        "tuned": errors["va"],
+    }
+
+    if test is not None:
+        result["test"] = score_test(predict, stream, transform, test, device)
+        result["test"]["va_check"] = errors["va"]
+
+    return result
+
+
 # == main ======================================================================
 
 
@@ -1267,7 +1379,9 @@ def main() -> None:
     parser.add_argument("--dataset", default="LenDB")
     parser.add_argument("--out", default="results")
     parser.add_argument(
-        "--model", default="hashboost", choices=("hashboost", "xgboost")
+        "--model",
+        default="hashboost",
+        choices=("hashboost", "xgboost", "extratrees"),
     )
     parser.add_argument(
         "--label",
@@ -1612,7 +1726,11 @@ def main() -> None:
     def checkpoint(entry: dict[str, Any]) -> None:
         write_results(out, {label: entry}, info)
 
-    runner = run_hashboost if args.model == "hashboost" else run_xgboost
+    runner = {
+        "hashboost": run_hashboost,
+        "xgboost": run_xgboost,
+        "extratrees": run_extratrees,
+    }[args.model]
     checkpoint(
         runner(
             stream,
