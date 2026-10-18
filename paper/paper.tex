@@ -435,7 +435,7 @@ defaults (100 rounds, learning rate 0.3, depth 6).
 \paragraph{Hardware and timing.}
 Every HashBoost and XGBoost run on MONSTER had one NVIDIA L40S (46\,GB) on
 Monash's M3 cluster to itself, so their times are directly comparable. ExtraTrees ran on
-CPU nodes with 36 cores, and its time is not. Training time includes the QUANT
+CPU nodes with 36 cores, so its time is not comparable. Training time includes the QUANT
 transform for both boosters. UCR and the streaming runs in
 \cref{sec:memory} used one RTX 4060 (8\,GB). Seeding does not make HashBoost
 reproducible, because float32 scatter-adds on the GPU accumulate in a
@@ -540,12 +540,11 @@ XGBoost run failed: WISDM's test fold 3 holds every series of two of its six
 classes, and XGBoost~3.4's intercept, estimated from a pool that lacks them,
 left it at test error 0.683. We report a rerun with the intercept fixed at
 0.5, the default before version 2.0 (0.178), with the original run's time.
-Counting the failed run, the ratio is 0.992 ($p = 0.71$).}. Where one model clearly leads, it is usually XGBoost: on
-TimeSen2Crop (HashBoost's error is 1.66 times XGBoost's), FordChallenge,
-WhaleSounds, both S2Agri subsets and MosquitoSound. HashBoost clearly leads
-only on AudioMNIST-DS. The 10 tuning datasets flatter HashBoost, which was
-developed on them for much longer than XGBoost was tuned: its ratio there is
-0.973, against 1.045 on the other 16.
+Counting the failed run, the ratio is 0.992 ($p = 0.71$).}. Where one model
+clearly leads, it is usually XGBoost: on 6 datasets, including both S2Agri
+subsets and TimeSen2Crop (where HashBoost's error is 1.66 times XGBoost's),
+against 1 for HashBoost (AudioMNIST-DS). HashBoost also does better on the 10
+datasets it was developed on (ratio 0.973) than on the other 16 (1.045).
 
 \begin{figure}[tbp]
     \centering
@@ -569,12 +568,10 @@ and sensor pools: MosquitoSound (1.52 times HashBoost's error), AudioMNIST-DS,
 FruitFlies, Pedestrian, InsectSound and TimeSen2Crop.
 
 \paragraph{Validation error is optimistic.}
-Test error is about 3.3 times validation error for all three models. The
-validation and tune slices are random draws from the
-pool, while the test folds differ from it in distribution. On DREAMERA,
-XGBoost's validation error is half HashBoost's (0.071 against 0.135), yet both
-are near 0.5 on test. Every model is tuned on the same optimistic slices, so
-the comparison stays fair.
+Test error is about 3.3 times validation error for all three models, because
+the test folds differ in distribution from the pool that the validation and
+tune slices are drawn from. Every model is tuned on the same slices, so the
+comparison stays fair.
 
 \subsection{Where the time goes (RQ2)}
 \label{sec:cost}
@@ -590,7 +587,7 @@ XGBoost's cost per round (Spearman $\rho = 0.87$, $p = 7\times10^{-9}$),
 while HashBoost's cost is set by its batch budget. On the cheapest datasets,
 such as WISDM, LakeIce and UCIActivity, XGBoost finishes in seconds and
 HashBoost's fixed cost per round makes it the slower model. On the most
-expensive, S2Agri and TimeSen2Crop, XGBoost takes hours and HashBoost minutes.
+expensive, S2Agri and TimeSen2Crop, XGBoost takes hours whilst HashBoost takes minutes.
 
 % src: notebooks/monster.ipynb, the speed section
 \begin{figure}[tbp]
@@ -606,7 +603,7 @@ expensive, S2Agri and TimeSen2Crop, XGBoost takes hours and HashBoost minutes.
     \label{fig:monster-speed}
 \end{figure}
 
-\paragraph{In the same time, XGBoost is far behind on the expensive datasets.}
+\paragraph{At equal time, XGBoost is far less accurate on the expensive datasets.}
 \Cref{fig:monster-speed} (right) gives XGBoost exactly HashBoost's total
 training time on each fold, patience included, and chooses its round on tune
 error among those it completed. On validation error, HashBoost is then ahead on
