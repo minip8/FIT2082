@@ -27,7 +27,8 @@
 \setlength{\emergencystretch}{3em}
 \newcommand{\pmsd}[2]{#1\,$\pm$\,#2}
 
-\author{Matthew Yang}
+\author{Matthew Yang\\
+    \small Student ID 36196479}
 \title{Fast Gradient Boosting without Trees\\for Large-Scale Time Series Classification}
 \date{\today}
 
@@ -122,6 +123,8 @@ data, it trains far faster exactly where XGBoost is most expensive. We ask:
     \item \textbf{The small-data boundary} on the 112 UCR datasets
           (\cref{sec:ucr}).
 \end{enumerate}
+
+Our code is available at \url{https://github.com/minip8/FIT2082}.
 
 % ==============================================================================
 \section{Background and Related Work}
@@ -311,7 +314,6 @@ needs no transfer back to the host, and a test checks that it chooses the same
 pairs as the Python version. The 224 tests also cover the QUANT port against
 its upstream reference. Every run writes its results to a file named after
 its commit, so every number here can be traced to the code that produced it.
-The code is available at \url{https://github.com/minip8/FIT2082}.
 
 % ==============================================================================
 \section{Experimental Setup}
