@@ -224,12 +224,12 @@ a new round's predicates are chosen as follows:
 \end{enumerate}
 Each bit therefore separates two examples the model currently gets wrong, and
 the only search is the sort in the first step. A \emph{gain-selected} variant
-draws $K$ such hard-pair candidates per bit and fills the bits one at a time,
-as CatBoost grows an oblivious tree: each bit takes the candidate with the
-highest second-order gain, $\sum G^2/(H+\epsilon)$, summed over the cells the
-earlier bits have made, where $G$ and $H$ are a cell's summed gradient and
-hessian (\cref{sec:leaves}). It still searches only $K$ random candidates per
-bit, on one batch.
+draws a pool of $bK$ such hard-pair candidates and fills the bits one at a
+time, as CatBoost grows an oblivious tree: each bit takes the unused candidate
+with the highest second-order gain, $\sum G^2/(H+\lambda)$ with $\lambda = 1$,
+summed over classes and over the cells the earlier bits have made. Here $G$
+and $H$ are the batch's gradient and hessian summed within a cell. It still
+searches only $bK$ random candidates, on one batch.
 
 \subsection{Fitting the leaves}
 \label{sec:leaves}
@@ -388,7 +388,7 @@ Both HashBoost configurations train for up to 5,000 batches of 4,096 rows,
 evaluate every 50 batches, stop once their best tune evaluation is 1,000
 batches old, and freeze rounds older than 128 batches:
 \begin{itemize}
-    \item \code{G}: 6-bit gain-selected rounds ($K = 64$ candidates per bit),
+    \item \code{G}: 6-bit gain-selected rounds ($K = 64$, so a pool of 384 candidates),
           $\epsilon = 100$, 8 rounds per batch. Picked on 18 datasets.
     \item \code{L}: 8-bit hard-pair rounds, $\epsilon = 1$, 16 rounds per
           batch. Picked on the largest pools (LenDB, both S2Agri, Traffic,
