@@ -68,20 +68,19 @@ prediction, where they remain competitive with, and frequently superior to,
 deep learning~\cite{shwartzziv2022tabular,grinsztajn2022why}. Tree ensembles
 are also the usual classifier on top of interval-based time series features:
 QUANT~\cite{dempster2024quant} passes its quantile features to extremely
-randomised trees, and PULSAR~\cite{pulsar} and its predecessors are used the
-same way.
+randomised trees, and PULSAR~\cite{pulsar} is used the same way.
 
 At the scale of the MONSTER
 benchmark~\cite{dempster2025monstermonashscalabletime}, with up to 5.9 million
 series per dataset and tens of thousands of features after QUANT, the
-classifier becomes the expensive part. A boosted tree is induced by searching
-split points on every feature, and a multiclass booster grows one tree per
-class per round. Each round therefore costs time in proportion to rows,
+classifier becomes the expensive part. To grow a boosted tree, the learner
+searches for split points on every feature, and a multiclass booster grows one
+tree per class per round. Each round therefore costs time in proportion to rows,
 features and classes together. Histogram binning, approximate split finding,
 gradient-based sampling and feature
 bundling~\cite{chen2016xgboost,ke2017lightgbm,friedman2002stochastic} reduce
-the constant factor. They do not remove the need to revisit, and hold, the
-whole training set in every round.
+the constant factor, but every round must still revisit the whole training
+set and hold it in memory.
 
 This paper replaces each tree with a \emph{global partition} of the feature
 space: $b$ axis-aligned threshold predicates, applied to every example at
@@ -91,8 +90,8 @@ labelled examples, so there is no search over the training set. Each leaf value
 is a Newton step computed from running sums of the gradient and hessian.
 Because the partition does not depend on which examples are in the current
 batch, those sums can be updated from any later mini-batch, and the model never
-needs the training set in one place. Its cost is set by how many rounds and
-batches it is given, not by how large the data is.
+needs the training set in one place. Its training cost is set by how many
+rounds and batches it is given, not by how large the data is.
 
 Our claim is that this booster matches tuned XGBoost's accuracy on large-scale
 time series classification, and that because its cost does not grow with the
@@ -110,9 +109,9 @@ data, it trains far faster exactly where XGBoost is most expensive. We ask:
 \paragraph{Contributions.}
 \begin{enumerate}
     \item \textbf{HashBoost}, a gradient booster whose weak learner is a global
-          partition, with round freezing, which makes its cost linear in
-          rounds, and a GPU implementation that agrees with an independent CPU
-          reference to $4\times10^{-7}$ (\cref{sec:method}).
+          partition. Round freezing makes its training cost linear in the
+          number of rounds, and its GPU implementation agrees with an
+          independent CPU reference to $4\times10^{-7}$ (\cref{sec:method}).
     \item \textbf{A test-fold comparison on all 26 MONSTER datasets} against
           XGBoost tuned by the same procedure and against QUANT's ExtraTrees,
           trained on whole pools of up to 4.65 million rows
@@ -171,9 +170,9 @@ pass over the whole training set every round. Learning from a stream is the
 other route. Hoeffding trees~\cite{domingos2000mining} grow one tree from a
 stream, splitting a leaf once enough examples have arrived to choose its test
 with confidence, and online boosting~\cite{oza2001online,beygelzimer2015online}
-updates every weak learner as each example arrives. HashBoost borrows from
-both: like online boosting it updates all existing learners from each new
-batch, but its learners' structure is fixed when they are created, so an
+updates every weak learner as each example arrives. HashBoost is closest to
+online boosting: it updates all existing learners from each new batch. Unlike
+online boosting, its learners' structure is fixed when they are created, so an
 update is a scatter-add rather than a refit.
 
 \paragraph{Time series classification.}
@@ -212,8 +211,8 @@ round has 256 buckets.
 
 \subsection{Choosing the predicates}
 
-Given the current batch, its probabilities and its labels, a new round's
-predicates are chosen as follows:
+Given the current batch, its labels and the model's predicted probabilities,
+a new round's predicates are chosen as follows:
 \begin{enumerate}
     \item Order the batch by cross entropy, hardest first.
     \item Walk that order and greedily form $b$ pairs of examples with
@@ -225,11 +224,13 @@ Each bit therefore separates two examples the model currently gets wrong, and
 the only search is the sort in the first step. A \emph{gain-selected} variant
 draws $K$ such hard-pair candidates per bit and fills the bits one at a time,
 as CatBoost grows an oblivious tree: each bit takes the candidate with the
-highest second-order gain, $\sum G^2/(H+\epsilon)$, within the cells the
-earlier bits have made. It still searches only $K$ random candidates per bit,
-on one batch.
+highest second-order gain, $\sum G^2/(H+\epsilon)$, summed over the cells the
+earlier bits have made, where $G$ and $H$ are a cell's summed gradient and
+hessian (\cref{sec:leaves}). It still searches only $K$ random candidates per
+bit, on one batch.
 
 \subsection{Fitting the leaves}
+\label{sec:leaves}
 
 We use the softmax cross-entropy gradient $g = p - \mathrm{onehot}(y)$ and a
 floored diagonal hessian $h = p(1-p) + 10^{-3}$. Every round keeps running sums
@@ -256,10 +257,10 @@ data.
     \label{alg:hashboost}
     \begin{algorithmic}[1]
         \For{$m = 1, \dots, M$}
-        \State $F \gets \sum_{r < R} L_r[c_r(X)]$ \Comment{$(n, k)$ logits}
+        \State $F \gets \sum_{r=1}^{R} L_r[c_r(X)]$ \Comment{$(n, k)$ logits}
         \State $p \gets \mathrm{softmax}(F)$;\quad $g \gets p - \mathrm{onehot}(y)$;\quad $h \gets p(1-p) + 10^{-3}$
-        \State choose predicates of round $R$ from hard pairs in $(X, y, p)$
-        \For{$r = 0, \dots, R$} \Comment{all rounds, including the new one}
+        \State choose predicates of round $R+1$ from hard pairs in $(X, y, p)$
+        \For{$r = 1, \dots, R+1$} \Comment{all rounds, including the new one}
         \State $G_r[c_r(X)] \mathrel{+}= -g$;\quad $H_r[c_r(X)] \mathrel{+}= h$ \Comment{scatter-add}
         \State $L_r \gets \eta\, G_r / (H_r + \epsilon)$
         \EndFor
@@ -274,14 +275,14 @@ data.
 A batch of $n$ rows costs encoding and scatter-adds over the rounds it
 touches, $O(nRb + nRk)$, plus choosing its new predicates on that batch alone.
 Nothing in this depends on the size $N$ of the training pool. Total cost is the
-number of batches times the cost per batch, and memory holds one batch and the
-tables. A boosted tree's round instead builds feature histograms over all $N$
+number of batches times the cost per batch, and memory holds only one batch and
+the tables. A boosted tree's round instead builds feature histograms over all $N$
 rows, for each of the $k$ class trees, so its cost per round grows with $N
 \cdot p \cdot k$, and it needs the binned matrix of all $N \times p$ values.
 
-Updating every round is HashBoost's own cost: a batch costs $O(R)$ once there
-are $R$ rounds, so $T$ batches cost $O(T^2)$. \emph{Round freezing} removes
-it. With a window of $W$ rounds, only the newest $W$ keep accumulating, and a
+HashBoost has a scaling problem of its own. Because every batch updates every
+round, a batch costs $O(R)$ once there are $R$ rounds, so $T$ batches cost
+$O(T^2)$. \emph{Round freezing} removes this growth. With a window of $W$ rounds, only the newest $W$ keep accumulating, and a
 frozen round's contribution to an example never changes again. Given stable
 row ids, each row's frozen contribution is summed once and cached in an
 $(N, k)$ table. A batch then costs $O(W + f)$, where $f$ is the number of
@@ -392,13 +393,14 @@ batches old, and freeze rounds older than 128 batches:
           batch. Picked on the largest pools (LenDB, both S2Agri, Traffic,
           Pedestrian), WhaleSounds and the EEG sets DREAMERA and DREAMERV.
 \end{itemize}
-In earlier development at 65,536 rows, gain selection had made the ensemble no
-better or worse, which suggested that random predicates are what keep rounds
-diverse enough to add up~\cite{geurts2006extremely}. On whole pools, with
-6-bit rounds and a heavy leaf penalty, it became the largest single gain in
-the screen (CrowdSourced's validation error fell from 0.042 to 0.006), and
-\code{L} keeps random predicates where it does not pay. Over five model seeds
-on fold 0, the pick was the same every time on 25 of the 26 datasets.
+Gain selection was a late addition. On 65,536-row slices it had not helped,
+which suggested that random predicates are what keep rounds diverse enough to
+add up~\cite{geurts2006extremely}. On whole pools, combined with 6-bit rounds
+and a heavy leaf penalty, it became the largest single gain in the screen
+(CrowdSourced's validation error fell from 0.042 to 0.006). \code{L} keeps
+random predicates for the datasets where gain selection does not pay. Over
+five model seeds on fold 0, the same configuration was picked every time on 25
+of the 26 datasets.
 
 We compare against one tree booster, tuned with the same effort as HashBoost,
 rather than several boosters at their defaults. We chose XGBoost because it
@@ -417,17 +419,17 @@ training, so it trains on the same rows and needs no tune slice.
 
 \paragraph{UCR.}
 For the small-data boundary we use the 112 univariate UCR
-datasets~\cite{dau2019ucr} with equal lengths and no missing values that the
-bake-off reports on~\cite{middlehurst2024bakeoff}, less Fungi, which has one
-training series per class, each on its default train/test split. The training
-sets have 16 to 8,926 series (median 190). There is no validation split, so
+datasets~\cite{dau2019ucr} that the bake-off reports
+on~\cite{middlehurst2024bakeoff}: the archive's 128, less the 15 with missing
+values or unequal lengths and Fungi, which has one training series per class.
+Each is used on its default train/test split. The training sets have 16 to 8,926 series (median 190). There is no validation split, so
 every model runs at fixed settings and we report test error: HashBoost at 800
 rounds of 8 bits, ExtraTrees with QUANT's settings, and XGBoost at its library
 defaults (100 rounds, learning rate 0.3, depth 6).
 
 \paragraph{Hardware and timing.}
-The MONSTER boosting runs each ran alone on one NVIDIA L40S (46\,GB) on
-Monash's M3 cluster, so their times are directly comparable. ExtraTrees ran on
+Every HashBoost and XGBoost run on MONSTER had one NVIDIA L40S (46\,GB) on
+Monash's M3 cluster to itself, so their times are directly comparable. ExtraTrees ran on
 CPU nodes with 36 cores, and its time is not. Training time includes the QUANT
 transform for both boosters. UCR and the streaming runs in
 \cref{sec:memory} used one RTX 4060 (8\,GB). Seeding does not make HashBoost
@@ -443,9 +445,10 @@ validation error is about 0.003.
 
 \Cref{tab:monster} gives each model's test error on the 26 MONSTER datasets,
 averaged over the five test folds, with training times, and
-\cref{tab:monster-summary} summarises the pairwise comparisons. Every restored
-model reproduced the validation error it had recorded at its tune-chosen round,
-which checks that test error was scored at that point.
+\cref{tab:monster-summary} summarises the pairwise comparisons. As a check,
+every model, reloaded for testing, reproduced the validation error it had
+recorded at its tune-chosen round, so test error was scored at the intended
+point.
 
 % src: results/test/fold{0-4}/*-{99fa5bc,580e549}.json and
 %      results/test/repaired; notebooks/monster.ipynb
@@ -539,7 +542,7 @@ the original run's. Counting the failed run instead, the ratio is 0.992
 TimeSen2Crop (HashBoost's error is 1.66 times XGBoost's), FordChallenge,
 WhaleSounds, both S2Agri subsets and MosquitoSound. HashBoost clearly leads
 only on AudioMNIST-DS. The 10 tuning datasets flatter HashBoost, which was
-developed on them over many more rounds than XGBoost: its ratio there is
+developed on them for much longer than XGBoost was tuned: its ratio there is
 0.973, against 1.045 on the other 16.
 
 \begin{figure}[t]
@@ -553,18 +556,19 @@ developed on them over many more rounds than XGBoost: its ratio there is
     \label{fig:monster-cd}
 \end{figure}
 
-\paragraph{Both boosters beat ExtraTrees.}
+\paragraph{Both boosters rank ahead of ExtraTrees.}
 The mean ranks are 1.77 for both boosters and 2.46 for ExtraTrees
 (\cref{fig:monster-cd}), 0.69 behind, just beyond the Nemenyi critical
 difference of 0.65. The margin is narrow for HashBoost: its pairwise
 Wilcoxon test against ExtraTrees is not significant ($p = 0.11$, against
 $0.031$ for XGBoost), although its error ratio of 0.90 has a 95\% interval of
-0.84--0.97 that excludes 1. ExtraTrees' largest losses are on big acoustic and sensor
-pools: MosquitoSound (1.52 times HashBoost's error), AudioMNIST-DS,
+0.84--0.97 that excludes 1. ExtraTrees' largest losses are on big acoustic
+and sensor pools: MosquitoSound (1.52 times HashBoost's error), AudioMNIST-DS,
 FruitFlies, Pedestrian, InsectSound and TimeSen2Crop.
 
-\paragraph{Test error is about 3.3 times validation error,}
-for all three models. The validation and tune slices are random draws from the
+\paragraph{Validation error is optimistic.}
+Test error is about 3.3 times validation error for all three models. The
+validation and tune slices are random draws from the
 pool, while the test folds differ from it in distribution. On DREAMERA,
 XGBoost's validation error is half HashBoost's (0.071 against 0.135), yet both
 are near 0.5 on test. Every model is tuned on the same optimistic slices, so
@@ -625,8 +629,8 @@ largest pools.
     \label{fig:monster-time}
 \end{figure}
 
-\paragraph{HashBoost stopped early on the largest pools.}
-Given unlimited time, XGBoost overtakes HashBoost on S2Agri and TimeSen2Crop,
+\paragraph{HashBoost's budget ran out on the largest pools.}
+Run to completion, XGBoost overtakes HashBoost on S2Agri and TimeSen2Crop,
 and those are among the datasets where it clearly leads on test. But HashBoost
 was stopped by its budget, not by its tune error: it reached its 5,000-batch
 cap on 14 of the 15 S2Agri and Traffic folds with its best tune error in the
@@ -672,17 +676,17 @@ freezes rounds older than 128 batches.
 \subsection{The small-data boundary (RQ3)}
 \label{sec:ucr}
 
-On the UCR 112 the training sets are small, and both of HashBoost's advantages
-disappear (\cref{tab:ucr}). Our ExtraTrees reproduces the published QUANT
+On the UCR 112 the training sets are small, and HashBoost loses both its
+accuracy and its speed advantage (\cref{tab:ucr}). Our ExtraTrees reproduces the published QUANT
 results~\cite{middlehurst2024bakeoff} (mean error 0.1475 against 0.1456), and
 it is both the most accurate model, significantly ahead of both boosters
 (\cref{fig:ucr-cd}), and the fastest, at 70\,s for all 112 against HashBoost's
 183\,s. At these sizes a round's cost is fixed overhead rather than
 arithmetic. HashBoost at its MONSTER defaults is level with default XGBoost
 (mean ranks 2.36 and 2.39). Its 8-bit rounds were set for buckets that see
-thousands of rows, and most UCR training sets cannot fill them. With fewer
-bits and more rounds, two bits and 3,200 rounds chosen by two-fold
-cross-validation over datasets, HashBoost is significantly ahead of XGBoost
+thousands of rows, and most UCR training sets cannot fill them. Resized for
+small data, with two bits and 3,200 rounds chosen by two-fold
+cross-validation over the datasets, HashBoost is significantly ahead of XGBoost
 (lower error on 82 datasets, higher on 29, $p = 4.5\times10^{-8}$) and still
 behind ExtraTrees (28 against 63, $p = 1.2\times10^{-5}$), at 7.5 times the
 time. Which classifier suits QUANT's features therefore depends on scale: an
@@ -732,28 +736,29 @@ A booster that does no search over the training set matches tuned XGBoost's
 accuracy on MONSTER's test folds, and its cost does not grow with the data.
 The two models' costs scale differently, so the speedup is not a constant: it
 follows how expensive XGBoost is, from slower on datasets XGBoost fits in
-seconds to 31 times faster on those it fits in hours. That is the regime the
-classifier's cost was a problem in, and the regime HashBoost is for. On small
+seconds to 31 times faster on those it fits in hours. That is where the
+classifier's cost was a problem, and where HashBoost is meant to be used. On small
 training sets the advantage reverses, and ExtraTrees is faster and more
 accurate.
 
 \paragraph{Accuracy for speed.}
 Where HashBoost is fastest it is also furthest behind once XGBoost has run to
-completion, by 1.12 times on S2Agri and 1.66 times on TimeSen2Crop. At equal
+completion: its error is 1.12 times XGBoost's on S2Agri and 1.66 times on
+TimeSen2Crop. At equal
 time it is far ahead on those datasets. On S2Agri it also stopped at its
 batch budget while still improving, so there the trade-off is at least partly
 set by a budget tuned on smaller pools rather than by a ceiling of the model.
-On TimeSen2Crop it reached the budget on two folds of five, and the gap there
-is the largest in the benchmark.
+On TimeSen2Crop it reached the budget on only two folds of five, so the
+budget explains less of that gap, which is the largest in the benchmark.
 
 \paragraph{Limitations.}
 \begin{itemize}
     \item The MONSTER benchmark is one run per test fold. Over five model seeds
           on fold 0, HashBoost's standard deviation was 0.0002 to 0.0024 on
           most datasets.
-    \item Both models' configurations were tuned for accuracy, not speed, and
-          on 10 of the 26 datasets, where HashBoost had also been developed for
-          longer and does better.
+    \item Both models were tuned for accuracy, not speed, and only on 10 of
+          the 26 datasets. HashBoost had been developed on those 10 for
+          longer, and does better on them.
     \item The time-matched comparison is on validation error, because test
           error was scored only at each model's own chosen round. XGBoost's
           clock is its build plus its mean time per round.
@@ -767,11 +772,12 @@ is the largest in the benchmark.
 \end{itemize}
 
 \paragraph{Future work.}
-A round budget that scales with the training pool, which the largest datasets
-suggest would buy accuracy for minutes of training; a configuration tuned for
-speed rather than accuracy, to map the trade-off on the test folds; a bit width
-chosen from rows per class, which would unify the UCR and MONSTER settings; and
-cheaper rounds for small datasets, where a round's cost is fixed overhead.
+The largest datasets suggest that a round budget that grows with the training
+pool would buy accuracy for minutes of training. A configuration tuned for
+speed rather than accuracy would map the trade-off on the test folds. Choosing
+the bit width from the number of rows per class could unify the UCR and
+MONSTER settings, and cheaper rounds would help on small datasets, where a
+round's cost is fixed overhead.
 
 % ==============================================================================
 \section{Conclusion}
@@ -784,8 +790,8 @@ memory does not grow with the training set. On all 26 MONSTER datasets, scored
 on the five test folds, it matches XGBoost tuned by the same procedure and
 trains 8.2 times faster in total on the same GPU, up to 31 times faster on the
 datasets where XGBoost is most expensive. Both boosters rank ahead of QUANT's
-ExtraTrees at this scale; on the small UCR datasets ExtraTrees is faster and
-more accurate.
+ExtraTrees at this scale, XGBoost clearly and HashBoost narrowly. On the small
+UCR datasets, ExtraTrees is both faster and more accurate.
 
 \clearpage
 \bibliographystyle{ieeetr}
