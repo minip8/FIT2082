@@ -232,11 +232,13 @@ a new round's predicates are chosen as follows:
 Each bit therefore separates two examples the model currently gets wrong, and
 the only search is the sort in the first step. A \emph{gain-selected} variant
 draws a pool of $bK$ such hard-pair candidates and fills the bits one at a
-time, as CatBoost grows an oblivious tree: each bit takes the unused candidate
+time, the way CatBoost grows an oblivious tree level by level
+(\cref{sec:related}): each bit takes the unused candidate
 with the highest second-order gain, $\sum G^2/(H+\lambda)$ with $\lambda = 1$,
 summed over classes and over the cells the earlier bits have made. Here $G$
-and $H$ are the batch's gradient and hessian summed within a cell. It still
-searches only $bK$ random candidates, on one batch.
+and $H$ are the batch's gradient and hessian summed within a cell. Unlike
+CatBoost, it scores only these $bK$ random candidates, on one batch, rather
+than every feature over the whole training set.
 
 \subsection{Fitting the leaves}
 \label{sec:leaves}
