@@ -20,6 +20,13 @@
 \usepackage{url}
 \usepackage[hidelinks]{hyperref}
 \usepackage[capitalise, noabbrev]{cleveref}
+% table captions sit above the table, and article gives them no space below
+\usepackage{caption}
+\captionsetup[table]{position=top, skip=6pt}
+\captionsetup[figure]{skip=6pt}
+% a fixed gap between floats and text, so a full page cannot squeeze it
+\setlength{\textfloatsep}{16pt plus 2pt minus 0pt}
+\setlength{\floatsep}{14pt plus 2pt minus 0pt}
 
 \newcommand{\todo}[1]{\textcolor{red}{[\textbf{TODO:} #1]}}
 \newcommand{\code}[1]{\texttt{#1}}
