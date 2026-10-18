@@ -27,6 +27,15 @@
 % a fixed gap between floats and text, so a full page cannot squeeze it
 \setlength{\textfloatsep}{16pt plus 2pt minus 0pt}
 \setlength{\floatsep}{14pt plus 2pt minus 0pt}
+% the results have more floats than text, so let a page hold more of them,
+% and keep every float inside its own section
+\renewcommand{\topfraction}{0.9}
+\renewcommand{\bottomfraction}{0.6}
+\renewcommand{\textfraction}{0.1}
+\renewcommand{\floatpagefraction}{0.75}
+\setcounter{topnumber}{3}
+\setcounter{totalnumber}{4}
+\usepackage[section]{placeins}
 
 \newcommand{\todo}[1]{\textcolor{red}{[\textbf{TODO:} #1]}}
 \newcommand{\code}[1]{\texttt{#1}}
@@ -340,7 +349,7 @@ choice made after training, such as early stopping. Validation error is used
 only to choose configurations.
 
 % src: results/test/fold0/*-99fa5bc.json (split block, transform block)
-\begin{table}[t]
+\begin{table}[tbp]
     \centering
     \small
     \caption{The 26 MONSTER datasets. ``Pool'' is the number of series outside
@@ -462,7 +471,7 @@ point.
 
 % src: results/test/fold{0-4}/*-{99fa5bc,580e549}.json and
 %      results/test/repaired; notebooks/monster.ipynb
-\begin{table}[t]
+\begin{table}[tbp]
     \centering
     \small
     \setlength{\tabcolsep}{4.5pt}
@@ -511,7 +520,7 @@ point.
     \end{tabular}
 \end{table}
 
-\begin{table}[t]
+\begin{table}[tbp]
     \centering
     \small
     \caption{MONSTER: pairwise comparisons over the 26 datasets. The ratio is
@@ -555,7 +564,7 @@ only on AudioMNIST-DS. The 10 tuning datasets flatter HashBoost, which was
 developed on them for much longer than XGBoost was tuned: its ratio there is
 0.973, against 1.045 on the other 16.
 
-\begin{figure}[t]
+\begin{figure}[tbp]
     \centering
     \includegraphics[width=0.75\linewidth]{figures/monster_cd.pdf}
     \caption{Critical difference diagram over MONSTER's 26
@@ -601,7 +610,7 @@ HashBoost's fixed cost per round makes it the slower model. On the most
 expensive, S2Agri and TimeSen2Crop, XGBoost takes hours and HashBoost minutes.
 
 % src: notebooks/monster.ipynb, the speed section
-\begin{figure}[t]
+\begin{figure}[tbp]
     \centering
     \includegraphics[width=\linewidth]{figures/monster_speed.pdf}
     \caption{Left: HashBoost's training speedup over XGBoost on each MONSTER
@@ -628,7 +637,7 @@ against HashBoost's 0.028 and 0.019, and 0.117 on TimeSen2Crop against 0.030.
 largest pools.
 
 % src: notebooks/monster.ipynb
-\begin{figure}[t]
+\begin{figure}[tbp]
     \centering
     \includegraphics[width=\linewidth]{figures/monster_time.pdf}
     \caption{Validation error against training time on fold 0 for the six
@@ -670,7 +679,7 @@ accuracy in 2.4 times less time (validation error \pmsd{0.2135}{0.0032} in 10.8\
 freezes rounds older than 128 batches.
 
 % src: notebooks/streaming.ipynb, section 6
-\begin{figure}[t]
+\begin{figure}[tbp]
     \centering
     \includegraphics[width=\linewidth]{figures/scaling.pdf}
     \caption{Left: HashBoost's model time per batch against rounds on a
@@ -704,7 +713,7 @@ average of random trees on small training sets, and a booster on large ones.
 
 % src: notebooks/ucr.ipynb, over results/UCR/*-84ac59c.json; the published
 %      rows are resample 0 of the bake-off's QUANT and HC2 result files.
-\begin{table}[t]
+\begin{table}[tbp]
     \centering
     \caption{UCR 112: test error on the default splits, one run per dataset.
         Mean rank is among the three models we ran. W/T/L is HashBoost's record
@@ -728,7 +737,7 @@ average of random trees on small training sets, and a booster on large ones.
     \end{tabular}
 \end{table}
 
-\begin{figure}[t]
+\begin{figure}[tbp]
     \centering
     \includegraphics[width=0.85\linewidth]{figures/ucr_cd.pdf}
     \caption{Critical difference diagram over the UCR
