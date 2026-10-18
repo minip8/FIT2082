@@ -39,24 +39,20 @@
     At the scale of the MONSTER benchmark, training the classifier is the
     expensive part of time series classification. A boosted tree ensemble
     such as XGBoost searches every feature for splits in every round, so its
-    cost per round grows with rows, features and classes together, and it
-    must hold the whole training set. We replace the tree with a
-    \emph{global partition}: $b$ threshold predicates, placed between pairs of
-    hard, differently labelled examples, that index a table of $2^b$ leaf
-    values. The resulting booster, HashBoost, trains from mini-batches on the
-    GPU. Its cost is set by its round budget rather than by the size of the
-    data, and its memory does not grow with the training set. On all 26
-    MONSTER datasets, after QUANT features, with both models tuned by the same
-    procedure and scored on MONSTER's five test folds, HashBoost matches tuned
-    XGBoost's accuracy to within a few percent (geometric-mean error ratio
-    1.02, 95\% interval 0.97--1.07) and trains
-    8.2$\times$ faster in total on the same GPU. The speedup tracks XGBoost's
-    cost (Spearman $\rho = 0.87$): HashBoost is up to 31$\times$ faster on the
-    most expensive datasets and slower on the cheapest, where XGBoost finishes
-    in seconds. Both boosters rank ahead of QUANT's own ExtraTrees
-    classifier, though HashBoost's lead is only just beyond the critical
-    difference. On the small UCR datasets the advantage disappears:
-    ExtraTrees is both faster and more accurate there.
+    cost grows with the size of the data, and it must hold the whole training
+    set. We replace the tree with a \emph{global partition}: a few threshold
+    predicates, placed between pairs of hard, differently labelled examples,
+    that index a table of leaf values. The resulting booster, HashBoost,
+    trains from mini-batches on the GPU. Its cost is set by its round budget
+    rather than by the size of the data, and its memory does not grow with
+    the training set. On all 26 MONSTER datasets, after QUANT features, with
+    both models tuned by the same procedure and scored on the official test
+    folds, HashBoost matches tuned XGBoost's accuracy and trains
+    8.2$\times$ faster in total on the same GPU: up to 31$\times$ faster on
+    the datasets where XGBoost is most expensive, though slower on the
+    cheapest. On the small datasets of the UCR archive the advantage
+    disappears: QUANT's own ExtraTrees classifier is both faster and more
+    accurate there.
 \end{abstract}
 
 \tableofcontents
