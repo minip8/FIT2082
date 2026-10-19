@@ -526,21 +526,19 @@ point.
 \end{table}
 
 \paragraph{HashBoost matches tuned XGBoost.}
-HashBoost's error is 1.016 times XGBoost's in geometric mean. It is lower on
-14 datasets and higher on 12, and lower on 61 of the 130 dataset-folds. The
-Wilcoxon test finds no difference ($p = 0.98$). A non-significant test alone
-does not show that two models are equal, so we also bound the gap: a 95\%
-$t$-interval over the 26 datasets' log error ratios gives a geometric-mean
-ratio between 0.97 and 1.07, so on average neither model's error is more than
-about 7\% above the other's\footnote{\label{fn:wisdm}One
+HashBoost's error is 1.016 times XGBoost's in geometric mean, and it is lower
+on 14 of the 26 datasets (\cref{tab:monster-summary}). The Wilcoxon test finds
+no difference ($p = 0.98$), but a non-significant test alone does not show
+that two models are equal, so we also bound the gap: a 95\% $t$-interval over
+the datasets' log error ratios puts the ratio between 0.97 and 1.07, within
+about 7\% either way\footnote{\label{fn:wisdm}One
     XGBoost run failed: WISDM's test fold 3 holds every series of two of its six
     classes, and XGBoost~3.4's intercept, estimated from a pool that lacks them,
     left it at test error 0.683. We report a rerun with the intercept fixed at
     0.5, the default before version 2.0 (0.178), with the original run's time.
     Counting the failed run, the ratio is 0.992 ($p = 0.71$).}. Where one model
-clearly leads, it is usually XGBoost: on 6 datasets, including both S2Agri
-subsets and TimeSen2Crop (where HashBoost's error is 1.66 times XGBoost's),
-against 1 for HashBoost (AudioMNIST-DS). HashBoost also does better on the 10
+clearly leads, it is usually XGBoost: on 6 datasets against 1, including both
+S2Agri subsets and TimeSen2Crop. HashBoost also does better on the 10
 datasets it was developed on (ratio 0.973) than on the other 16 (1.045).
 
 \begin{figure}[tbp]
@@ -555,14 +553,12 @@ datasets it was developed on (ratio 0.973) than on the other 16 (1.045).
 \end{figure}
 
 \paragraph{Both boosters rank ahead of ExtraTrees.}
-The mean ranks are 1.77 for both boosters and 2.46 for ExtraTrees
-(\cref{fig:monster-cd}), 0.69 behind, just beyond the Nemenyi critical
-difference of 0.65. The margin is narrow for HashBoost: its pairwise
-Wilcoxon test against ExtraTrees is not significant ($p = 0.11$, against
-$0.031$ for XGBoost), although its error ratio of 0.90 has a 95\% interval of
-0.84--0.97 that excludes 1. ExtraTrees' largest losses are on big acoustic
-and sensor pools: MosquitoSound (1.52 times HashBoost's error), AudioMNIST-DS,
-FruitFlies, Pedestrian, InsectSound and TimeSen2Crop.
+Both boosters have a mean rank of 1.77, against 2.46 for ExtraTrees, just
+beyond the critical difference (\cref{fig:monster-cd}). The margin is narrow
+for HashBoost: its pairwise Wilcoxon test against ExtraTrees is not
+significant ($p = 0.11$), although the 95\% interval on its error ratio,
+0.84--0.97, excludes 1. ExtraTrees loses most on large acoustic and sensor
+pools such as MosquitoSound, AudioMNIST-DS and Pedestrian.
 
 \paragraph{Validation error is optimistic.}
 Test error is about 3.3 times validation error for all three models, because
@@ -574,13 +570,12 @@ comparison stays fair.
 \label{sec:cost}
 
 \paragraph{The speedup follows XGBoost's cost.}
-On the same GPU, HashBoost trained 8.2 times faster than XGBoost in total:
-18,214\,s against 149,099\,s over the 130 dataset-folds. The total hides a wide
-range. Per dataset, HashBoost is faster on 14 of the 26, with a median speedup
-of 1.23, and the range runs from 31 times faster on S2Agri-10pc-34 to 7 times
+On the same GPU, HashBoost trained 8.2 times faster than XGBoost in total
+(\cref{tab:monster}), but the total hides a wide range. HashBoost is faster on
+14 of the 26 datasets, from 31 times faster on S2Agri-10pc-34 to 7 times
 slower on WISDM. \Cref{fig:monster-speed} (left) shows what decides it. The
 speedup rises with $N \cdot p \cdot k$, the rows, features and classes that set
-XGBoost's cost per round (Spearman $\rho = 0.87$, $p = 7\times10^{-9}$),
+XGBoost's cost per round (Spearman $\rho = 0.87$),
 while HashBoost's cost is set by its batch budget. On the cheapest datasets,
 such as WISDM, LakeIce and UCIActivity, XGBoost finishes in seconds and
 HashBoost's fixed cost per round makes it the slower model. On the most
@@ -603,15 +598,13 @@ expensive, S2Agri and TimeSen2Crop, XGBoost takes hours whilst HashBoost takes m
 \paragraph{At equal time, XGBoost is far less accurate on the expensive datasets.}
 \Cref{fig:monster-speed} (right) gives XGBoost exactly HashBoost's total
 training time on each fold, patience included, and chooses its round on tune
-error among those it completed. On validation error, HashBoost is then ahead on
-19 of the 26 datasets, and XGBoost's error is 1.35 times HashBoost's in
-geometric mean. That difference is not significant across all 26 (Wilcoxon $p
-    = 0.24$), because on the cheaper datasets XGBoost finishes within HashBoost's
-time anyway. The gap is concentrated where training is expensive: in
-HashBoost's time, XGBoost reaches 0.27 and 0.29 on the two S2Agri subsets,
-against HashBoost's 0.028 and 0.019, and 0.117 on TimeSen2Crop against 0.030.
-\Cref{fig:monster-time} shows the curves behind these numbers for the six
-largest pools.
+error among those it completed. HashBoost is then ahead on validation error
+on 19 of the 26 datasets. Across all 26 the difference is not significant
+(Wilcoxon $p = 0.24$), because on the cheaper datasets XGBoost finishes within
+HashBoost's time anyway. Where training is expensive the gap is large: in
+HashBoost's time, XGBoost reaches 0.27--0.29 on the two S2Agri subsets, against
+HashBoost's 0.02--0.03, with a similar gap on TimeSen2Crop.
+\Cref{fig:monster-time} shows the curves for the six largest pools.
 
 % src: notebooks/monster.ipynb
 \begin{figure}[tbp]
@@ -643,16 +636,16 @@ because each batch is folded into the tables and freed. XGBoost's binned matrix
 grows linearly with the pool, to 14.6\,GB (\cref{fig:scaling}, right). On the
 8\,GB card it had to page that matrix from disk every round, at 116\,s per
 round against 0.68\,s at 65,536 rows. In the MONSTER benchmark on the L40S,
-tuned XGBoost held LenDB's matrix on the card at 17.1--17.8\,GB, against
-3.4--4.9\,GB for HashBoost's \code{L}.
+tuned XGBoost used about 17\,GB of GPU memory on LenDB, against at most
+4.9\,GB for HashBoost.
 
 \paragraph{Freezing keeps the cost per batch flat.}
 Without freezing, per-batch cost grows with rounds: on a streamed Traffic run
 it rose from 2\,ms to 14.5\,ms over 2,840 rounds, while a window of one or two
 epochs' rounds held it level (\cref{fig:scaling}, left). On Pedestrian, with
 two rounds per batch, a window of ten epochs matched the unfrozen model's
-accuracy in 2.4 times less time (validation error \pmsd{0.2135}{0.0032} in 10.8\,s against
-\pmsd{0.2133}{0.0025} in 25.6\,s, three runs each). Every MONSTER configuration
+validation error (0.2135 against 0.2133, three runs each) in 2.4 times less
+time. Every MONSTER configuration
 freezes rounds older than 128 batches.
 
 % src: notebooks/streaming.ipynb, section 6
@@ -673,19 +666,17 @@ freezes rounds older than 128 batches.
 \label{sec:ucr}
 
 On the UCR 112 the training sets are small, and HashBoost loses both its
-accuracy and its speed advantage (\cref{tab:ucr}). Our ExtraTrees reproduces the published QUANT
-results~\cite{middlehurst2024bakeoff} (mean error 0.1475 against 0.1456), and
-it is both the most accurate model, significantly ahead of both boosters
-(\cref{fig:ucr-cd}), and the fastest, at 70\,s for all 112 against HashBoost's
-183\,s. At these sizes a round's cost is fixed overhead rather than
-arithmetic. HashBoost at its MONSTER defaults is level with default XGBoost
-(mean ranks 2.36 and 2.39). Its 8-bit rounds were set for buckets that see
+accuracy and its speed advantage (\cref{tab:ucr}). Our ExtraTrees reproduces
+the published QUANT results~\cite{middlehurst2024bakeoff}, and it is both the
+most accurate model, significantly ahead of both boosters (\cref{fig:ucr-cd}),
+and the fastest, in under half HashBoost's time. At these sizes a round's cost
+is fixed overhead rather than arithmetic. At its MONSTER defaults HashBoost is
+level with default XGBoost: its 8-bit rounds were set for buckets that see
 thousands of rows, and most UCR training sets cannot fill them. Resized for
 small data, with two bits and 3,200 rounds chosen by two-fold
-cross-validation over the datasets, HashBoost is significantly ahead of XGBoost
-(lower error on 82 datasets, higher on 29, $p = 4.5\times10^{-8}$) and still
-behind ExtraTrees (28 against 63, $p = 1.2\times10^{-5}$), at 7.5 times the
-time. Which classifier suits QUANT's features therefore depends on scale: an
+cross-validation over the datasets, HashBoost is significantly ahead of
+XGBoost (lower error on 82 datasets against 29) but still behind ExtraTrees
+(28 against 63), at 7.5 times its default training time. Which classifier suits QUANT's features therefore depends on scale: an
 average of random trees on small training sets, and a booster on large ones.
 
 % src: notebooks/ucr.ipynb, over results/UCR/*-84ac59c.json; the published
