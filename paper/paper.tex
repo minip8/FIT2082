@@ -53,22 +53,21 @@
 
 % ==============================================================================
 \begin{abstract}
-    On large time series datasets, training the classifier becomes the
-    expensive part of classification. A boosted tree ensemble such as XGBoost
+    On large time series datasets, training the classifier becomes increasingly expensive. A boosted tree ensemble such as XGBoost
     searches every feature for splits in every round, so its cost grows with
-    the size of the data, and it must hold the whole training set. We replace the tree with a \emph{global partition}: a few threshold
+    the size of the data, and it must hold the whole training set in memory.
+    We replace the tree with a \emph{global partition}: a few threshold
     predicates, placed between pairs of hard, differently labelled examples,
     that index a table of leaf values. The resulting booster, HashBoost,
-    trains from mini-batches on the GPU. Its cost is set by its round budget
+    trains from mini-batches on the GPU. HashBoost's cost is set by the round budget
     rather than by the size of the data, and its memory does not grow with
-    the training set. We evaluate it on MONSTER, a benchmark of 26 large time
+    the training set. We evaluate this model on MONSTER, a benchmark of 26 large time
     series datasets, using QUANT features. With both models tuned by the same
     procedure and scored on the official test folds, HashBoost matches tuned
-    XGBoost's accuracy and trains 8.2$\times$ faster in total on the same GPU: up to 31$\times$ faster on
-    the datasets where XGBoost is most expensive, though slower on the
-    cheapest. On the small datasets of the UCR archive the advantage
-    disappears: QUANT's own ExtraTrees classifier is both faster and more
-    accurate there.
+    XGBoost's accuracy and trains 8.2$\times$ faster in total on the same GPU: up to 31$\times$ faster on the larger datasets where
+    XGBoost is most expensive, though slower on the cheapest. On the small
+    datasets of the UCR archive the advantage disappears: QUANT's own
+    ExtraTrees classifier is both faster and more accurate there.
 \end{abstract}
 
 
@@ -90,22 +89,20 @@ series per dataset and tens of thousands of features after QUANT, the
 classifier becomes the expensive part. To grow a boosted tree, the learner
 searches for split points on every feature, and a multiclass booster grows one
 tree per class per round. Each round therefore costs time in proportion to rows,
-features and classes together. Histogram binning, approximate split finding,
+features and classes together. Current techniques such as histogram binning, approximate split finding,
 gradient-based sampling and feature
 bundling~\cite{chen2016xgboost,ke2017lightgbm,friedman2002stochastic} reduce
 the constant factor, but every round must still revisit the whole training
 set and hold it in memory.
 
 This paper replaces each tree with a \emph{global partition} of the feature
-space: $b$ axis-aligned threshold predicates, applied to every example at
+space. We use $b$ axis-aligned threshold predicates, applied to every example at
 once, whose $b$ bits index a table of $2^b$ leaf values. A predicate takes a
 random feature and puts its threshold at the midpoint of two hard, differently
-labelled examples, so there is no search over the training set. Each leaf value
-is a Newton step computed from running sums of the gradient and hessian.
+labelled examples, so there is no expensive search over the training set.
 Because the partition does not depend on which examples are in the current
-batch, those sums can be updated from any later mini-batch, and the model never
-needs the training set in one place. Its training cost is set by how many
-rounds and batches it is given, not by how large the data is.
+batch, its leaf values can be re-estimated from any later mini-batch, and the model never
+needs the training set all in memory at once.
 
 Our claim is that this booster matches tuned XGBoost's accuracy on large-scale
 time series classification, and that because its cost does not grow with the
@@ -113,19 +110,18 @@ data, it trains far faster exactly where XGBoost is most expensive. We ask:
 \begin{description}
     \item[RQ1] Given the same tuning effort, does HashBoost match a tuned
           boosted tree ensemble's accuracy on MONSTER's test folds?
-    \item[RQ2] How much faster is it, on which datasets, and why? What does
+    \item[RQ2] How much faster is HashBoost, on which datasets, and why? What does
           each model reach in the same training time, and what memory
           does each need?
-    \item[RQ3] Where does the advantage stop? We test the small training sets
-          of the UCR archive.
+    \item[RQ3] Where does the advantage stop? Does it hold on small
+          training sets?
 \end{description}
 
 \paragraph{Contributions.}
 \begin{enumerate}
     \item \textbf{HashBoost}, a gradient booster whose weak learner is a global
-          partition. Round freezing makes its training cost linear in the
-          number of rounds, and its GPU implementation agrees with an
-          independent CPU reference to $4\times10^{-7}$ (\cref{sec:method}).
+          partition, with a GPU implementation that trains from mini-batches
+          (\cref{sec:method}).
     \item \textbf{A test-fold comparison on all 26 MONSTER datasets} against
           XGBoost tuned by the same procedure and against QUANT's ExtraTrees,
           trained on whole pools of up to 4.65 million rows
@@ -310,15 +306,16 @@ rounds.
 \subsection{Implementation}
 \label{sec:implementation}
 
-HashBoost runs entirely on the GPU in PyTorch. The original numba CPU
-implementation is kept as a reference: given the same predicates, the two agree
-to $4\times10^{-7}$ in logits with identical predictions. The GPU version trains Pedestrian's default 800 rounds in about 7.5\,s,
-against 101.5\,s for the reference.
+HashBoost runs entirely on the GPU in PyTorch. The first implementation was a
+CPU prototype in numba, which we kept as a test oracle for the GPU version:
+given the same predicates, the two agree to $4\times10^{-7}$ in logits with
+identical predictions. The GPU version trains Pedestrian's default 800 rounds
+in about 7.5\,s, against 101.5\,s for the prototype.
 
 The code is organised so that an experiment can change one component at a
 time. The predicate family, the split selector and the loss are separate
 interfaces (Python \code{Protocol}s), and every experimental change is an
-opt-in option, so the default model stays the reference algorithm. On the GPU
+opt-in option, so the default model stays the prototype's algorithm. On the GPU
 the greedy pairing of hard examples runs as a single Triton kernel, so a round
 needs no transfer back to the host, and a test checks that it chooses the same
 pairs as the Python version. The 224 tests also cover the QUANT port against
@@ -778,6 +775,11 @@ leaves refined by every later mini-batch, matched tuned XGBoost on MONSTER at a
 cost set by its own budget rather than by the data. That makes it fastest
 where tree boosting is slowest, and the wrong choice on small datasets, where
 ExtraTrees is both faster and more accurate.
+
+\section*{Acknowledgements}
+
+I thank Angus Dempster for supervising this project. This work was
+supported by the MASSIVE HPC facility (\url{www.massive.org.au}).
 
 \bibliographystyle{ieeetr}
 \bibliography{references}
