@@ -112,12 +112,12 @@ time series classification, and that because its cost does not grow with the
 data, it trains far faster exactly where XGBoost is most expensive. We ask:
 \begin{description}
     \item[RQ1] Given the same tuning effort, does HashBoost match a tuned
-               boosted tree ensemble's accuracy on MONSTER's test folds?
+          boosted tree ensemble's accuracy on MONSTER's test folds?
     \item[RQ2] How much faster is it, on which datasets, and why? What does
-               each model reach in the same training time, and what memory
-               does each need?
+          each model reach in the same training time, and what memory
+          does each need?
     \item[RQ3] Where does the advantage stop? We test the small training sets
-               of the UCR archive.
+          of the UCR archive.
 \end{description}
 
 \paragraph{Contributions.}
@@ -296,7 +296,7 @@ Nothing in this depends on the size $N$ of the training pool. Total cost is the
 number of batches times the cost per batch, and memory holds only one batch and
 the tables. A boosted tree's round instead builds feature histograms over all $N$
 rows, for each of the $k$ class trees, so its cost per round grows with $N
-\cdot p \cdot k$, and it needs the binned matrix of all $N \times p$ values.
+    \cdot p \cdot k$, and it needs the binned matrix of all $N \times p$ values.
 
 HashBoost has a scaling problem of its own. Because every batch updates every
 round, a batch costs $O(R)$ once there are $R$ rounds, so $T$ batches cost
@@ -352,34 +352,34 @@ only to choose configurations.
     \label{tab:monster-data}
     \begin{tabular}{lrrrrr}
         \toprule
-        dataset & series & pool & train & classes & QUANT features \\
+        dataset               & series    & pool      & train     & classes & QUANT features \\
         \midrule
-        AudioMNIST-DS          &    30,000 &    24,000 &    15,808 &  10 &  35,349 \\
-        CornellWhaleChallenge  &    30,000 &    24,000 &    15,808 &   2 &  35,349 \\
-        CrowdSourced           &    12,289 &     9,456 &     5,674 &   2 &  31,542 \\
-        DREAMERA               &   170,246 &   140,638 &   132,446 &   2 &  31,542 \\
-        DREAMERV               &   170,246 &   140,638 &   132,446 &   2 &  31,542 \\
-        FordChallenge          &    36,257 &    29,003 &    20,811 &   2 &  14,130 \\
-        FruitFlies             &    34,518 &    27,614 &    19,422 &   3 &  44,031 \\
-        InsectSound            &    50,000 &    40,000 &    32,768 &  10 &   5,470 \\
-        LakeIce                &   129,280 &   103,424 &    95,232 &   3 &   1,652 \\
-        LenDB                  & 1,244,942 &   983,483 &   975,291 &   2 &  14,940 \\
-        MosquitoSound          &   279,566 &   223,652 &   215,460 &   6 &  33,178 \\
-        Opportunity            &    17,386 &    12,184 &     7,312 &   5 & 117,746 \\
-        PAMAP2                 &    38,856 &    28,961 &    20,769 &  12 &  54,184 \\
-        Pedestrian             &   189,621 &   151,696 &   143,504 &  82 &     212 \\
-        S2Agri-10pc-17         & 5,850,881 & 4,661,858 & 4,653,666 &  17 &   2,120 \\
-        S2Agri-10pc-34         & 5,850,881 & 4,661,858 & 4,653,666 &  29 &   2,120 \\
-        STEW                   &    28,512 &    21,384 &    13,192 &   2 &  31,542 \\
-        Skoda                  &    14,117 &    11,290 &     6,774 &  11 &  62,520 \\
-        TimeSen2Crop           & 1,135,511 &   839,971 &   831,779 &  15 &  30,096 \\
-        Tiselac                &    99,687 &    79,907 &    71,715 &   9 &   2,040 \\
-        Traffic                & 1,460,968 & 1,168,774 & 1,160,582 &   7 &     212 \\
-        UCIActivity            &    10,299 &     7,898 &     4,740 &   6 &  10,440 \\
-        USCActivity            &    56,228 &    43,060 &    34,868 &  12 &   6,252 \\
-        WISDM                  &    17,166 &    11,989 &     7,195 &   6 &   3,126 \\
-        WISDM2                 &   149,034 &    98,094 &    89,902 &   6 &   3,126 \\
-        WhaleSounds            &   105,163 &    84,130 &    75,938 &   8 &  22,105 \\
+        AudioMNIST-DS         & 30,000    & 24,000    & 15,808    & 10      & 35,349         \\
+        CornellWhaleChallenge & 30,000    & 24,000    & 15,808    & 2       & 35,349         \\
+        CrowdSourced          & 12,289    & 9,456     & 5,674     & 2       & 31,542         \\
+        DREAMERA              & 170,246   & 140,638   & 132,446   & 2       & 31,542         \\
+        DREAMERV              & 170,246   & 140,638   & 132,446   & 2       & 31,542         \\
+        FordChallenge         & 36,257    & 29,003    & 20,811    & 2       & 14,130         \\
+        FruitFlies            & 34,518    & 27,614    & 19,422    & 3       & 44,031         \\
+        InsectSound           & 50,000    & 40,000    & 32,768    & 10      & 5,470          \\
+        LakeIce               & 129,280   & 103,424   & 95,232    & 3       & 1,652          \\
+        LenDB                 & 1,244,942 & 983,483   & 975,291   & 2       & 14,940         \\
+        MosquitoSound         & 279,566   & 223,652   & 215,460   & 6       & 33,178         \\
+        Opportunity           & 17,386    & 12,184    & 7,312     & 5       & 117,746        \\
+        PAMAP2                & 38,856    & 28,961    & 20,769    & 12      & 54,184         \\
+        Pedestrian            & 189,621   & 151,696   & 143,504   & 82      & 212            \\
+        S2Agri-10pc-17        & 5,850,881 & 4,661,858 & 4,653,666 & 17      & 2,120          \\
+        S2Agri-10pc-34        & 5,850,881 & 4,661,858 & 4,653,666 & 29      & 2,120          \\
+        STEW                  & 28,512    & 21,384    & 13,192    & 2       & 31,542         \\
+        Skoda                 & 14,117    & 11,290    & 6,774     & 11      & 62,520         \\
+        TimeSen2Crop          & 1,135,511 & 839,971   & 831,779   & 15      & 30,096         \\
+        Tiselac               & 99,687    & 79,907    & 71,715    & 9       & 2,040          \\
+        Traffic               & 1,460,968 & 1,168,774 & 1,160,582 & 7       & 212            \\
+        UCIActivity           & 10,299    & 7,898     & 4,740     & 6       & 10,440         \\
+        USCActivity           & 56,228    & 43,060    & 34,868    & 12      & 6,252          \\
+        WISDM                 & 17,166    & 11,989    & 7,195     & 6       & 3,126          \\
+        WISDM2                & 149,034   & 98,094    & 89,902    & 6       & 3,126          \\
+        WhaleSounds           & 105,163   & 84,130    & 75,938    & 8       & 22,105         \\
         \bottomrule
     \end{tabular}
 \end{table}
@@ -470,38 +470,38 @@ point.
     \label{tab:monster}
     \begin{tabular}{lcrcrrrrr}
         \toprule
-        & \multicolumn{2}{c}{HashBoost} & \multicolumn{2}{c}{XGBoost} & ExtraTrees & \multicolumn{3}{c}{time (s)} \\
+                              & \multicolumn{2}{c}{HashBoost} & \multicolumn{2}{c}{XGBoost} & ExtraTrees & \multicolumn{3}{c}{time (s)}                                                \\
         \cmidrule(lr){2-3} \cmidrule(lr){4-5} \cmidrule(lr){7-9}
-        dataset & config & error & config & error & error & HB & XGB & ET \\
+        dataset               & config                        & error                       & config     & error                        & error           & HB     & XGB     & ET      \\
         \midrule
-        AudioMNIST-DS          & G & \textbf{0.0816} & d4 & 0.0884 & 0.1270 & 503 & 885 & 429 \\
-        CornellWhaleChallenge  & G & 0.1250 & d8 & \textbf{0.1233} & 0.1262 & 290 & 424 & 412 \\
-        CrowdSourced           & G & 0.3501 & d4 & 0.3622 & \textbf{0.3396} & 192 & 95 & 119 \\
-        DREAMERA               & L & 0.5161 & d8 & 0.5312 & \textbf{0.4867} & 438 & 1,775 & 4,253 \\
-        DREAMERV               & L & \textbf{0.4036} & d8 & 0.4038 & 0.4179 & 434 & 2,264 & 4,235 \\
-        FordChallenge          & G & 0.0823 & d8 & 0.0731 & \textbf{0.0715} & 196 & 152 & 224 \\
-        FruitFlies             & G & \textbf{0.0458} & d4 & 0.0462 & 0.0619 & 383 & 384 & 670 \\
-        InsectSound            & G & \textbf{0.1872} & d4 & 0.1891 & 0.2268 & 520 & 357 & 148 \\
-        LakeIce                & G & \textbf{0.0018} & d4 & 0.0019 & 0.0024 & 195 & 38 & 116 \\
-        LenDB                  & L & 0.0538 & d4 & \textbf{0.0522} & 0.0551 & 728 & 1,364 & 25,843 \\
-        MosquitoSound          & G & 0.1052 & d4 & \textbf{0.1008} & 0.1596 & 1,855 & 5,054 & 7,366 \\
-        Opportunity            & G & 0.1322 & d4 & \textbf{0.1305} & 0.1394 & 399 & 852 & 761 \\
-        PAMAP2                 & G & \textbf{0.2143} & d4 & 0.2246 & 0.2288 & 277 & 1,025 & 1,013 \\
-        Pedestrian             & L & \textbf{0.1746} & d8 & 0.1772 & 0.2135 & 2,588 & 792 & 61 \\
-        S2Agri-10pc-17         & L & 0.2829 & d8 & 0.2525 & \textbf{0.2521} & 1,463 & 30,068 & 18,291 \\
-        S2Agri-10pc-34         & L & 0.2828 & d8 & \textbf{0.2530} & 0.2638 & 2,013 & 61,933 & 16,151 \\
-        STEW                   & G & \textbf{0.1937} & d4 & 0.1993 & 0.2371 & 325 & 310 & 382 \\
-        Skoda                  & G & 0.0567 & d4 & 0.0610 & \textbf{0.0565} & 354 & 784 & 293 \\
-        TimeSen2Crop           & G & 0.1412 & d4 & \textbf{0.0849} & 0.1808 & 1,926 & 35,655 & 32,910 \\
-        Tiselac                & G & \textbf{0.2139} & d4 & 0.2140 & 0.2172 & 396 & 268 & 115 \\
-        Traffic                & L & 0.2841 & d8 & 0.2939 & \textbf{0.2488} & 846 & 407 & 375 \\
-        UCIActivity            & G & \textbf{0.0521} & d4 & 0.0675 & 0.0855 & 169 & 46 & 21 \\
-        USCActivity            & G & 0.2428 & d4 & \textbf{0.2396} & 0.2751 & 497 & 305 & 188 \\
-        WISDM                  & G & 0.1152 & d4 & \textbf{0.1131}$^\dagger$ & 0.1298 & 161 & 22 & 17 \\
-        WISDM2                 & G & 0.2556 & d4 & \textbf{0.2541} & 0.2614 & 458 & 206 & 297 \\
-        WhaleSounds            & L & 0.3128 & d8 & \textbf{0.2802} & 0.2936 & 612 & 3,633 & 1,856 \\
+        AudioMNIST-DS         & G                             & \textbf{0.0816}             & d4         & 0.0884                       & 0.1270          & 503    & 885     & 429     \\
+        CornellWhaleChallenge & G                             & 0.1250                      & d8         & \textbf{0.1233}              & 0.1262          & 290    & 424     & 412     \\
+        CrowdSourced          & G                             & 0.3501                      & d4         & 0.3622                       & \textbf{0.3396} & 192    & 95      & 119     \\
+        DREAMERA              & L                             & 0.5161                      & d8         & 0.5312                       & \textbf{0.4867} & 438    & 1,775   & 4,253   \\
+        DREAMERV              & L                             & \textbf{0.4036}             & d8         & 0.4038                       & 0.4179          & 434    & 2,264   & 4,235   \\
+        FordChallenge         & G                             & 0.0823                      & d8         & 0.0731                       & \textbf{0.0715} & 196    & 152     & 224     \\
+        FruitFlies            & G                             & \textbf{0.0458}             & d4         & 0.0462                       & 0.0619          & 383    & 384     & 670     \\
+        InsectSound           & G                             & \textbf{0.1872}             & d4         & 0.1891                       & 0.2268          & 520    & 357     & 148     \\
+        LakeIce               & G                             & \textbf{0.0018}             & d4         & 0.0019                       & 0.0024          & 195    & 38      & 116     \\
+        LenDB                 & L                             & 0.0538                      & d4         & \textbf{0.0522}              & 0.0551          & 728    & 1,364   & 25,843  \\
+        MosquitoSound         & G                             & 0.1052                      & d4         & \textbf{0.1008}              & 0.1596          & 1,855  & 5,054   & 7,366   \\
+        Opportunity           & G                             & 0.1322                      & d4         & \textbf{0.1305}              & 0.1394          & 399    & 852     & 761     \\
+        PAMAP2                & G                             & \textbf{0.2143}             & d4         & 0.2246                       & 0.2288          & 277    & 1,025   & 1,013   \\
+        Pedestrian            & L                             & \textbf{0.1746}             & d8         & 0.1772                       & 0.2135          & 2,588  & 792     & 61      \\
+        S2Agri-10pc-17        & L                             & 0.2829                      & d8         & 0.2525                       & \textbf{0.2521} & 1,463  & 30,068  & 18,291  \\
+        S2Agri-10pc-34        & L                             & 0.2828                      & d8         & \textbf{0.2530}              & 0.2638          & 2,013  & 61,933  & 16,151  \\
+        STEW                  & G                             & \textbf{0.1937}             & d4         & 0.1993                       & 0.2371          & 325    & 310     & 382     \\
+        Skoda                 & G                             & 0.0567                      & d4         & 0.0610                       & \textbf{0.0565} & 354    & 784     & 293     \\
+        TimeSen2Crop          & G                             & 0.1412                      & d4         & \textbf{0.0849}              & 0.1808          & 1,926  & 35,655  & 32,910  \\
+        Tiselac               & G                             & \textbf{0.2139}             & d4         & 0.2140                       & 0.2172          & 396    & 268     & 115     \\
+        Traffic               & L                             & 0.2841                      & d8         & 0.2939                       & \textbf{0.2488} & 846    & 407     & 375     \\
+        UCIActivity           & G                             & \textbf{0.0521}             & d4         & 0.0675                       & 0.0855          & 169    & 46      & 21      \\
+        USCActivity           & G                             & 0.2428                      & d4         & \textbf{0.2396}              & 0.2751          & 497    & 305     & 188     \\
+        WISDM                 & G                             & 0.1152                      & d4         & \textbf{0.1131}$^\dagger$    & 0.1298          & 161    & 22      & 17      \\
+        WISDM2                & G                             & 0.2556                      & d4         & \textbf{0.2541}              & 0.2614          & 458    & 206     & 297     \\
+        WhaleSounds           & L                             & 0.3128                      & d8         & \textbf{0.2802}              & 0.2936          & 612    & 3,633   & 1,856   \\
         \midrule
-        total &  &  &  &  &  & 18,214 & 149,099 & 116,546 \\
+        total                 &                               &                             &            &                              &                 & 18,214 & 149,099 & 116,546 \\
         \bottomrule
     \end{tabular}
 \end{table}
@@ -519,11 +519,11 @@ point.
     \label{tab:monster-summary}
     \begin{tabular}{lrrrr}
         \toprule
-        comparison & ratio & W/T/L & clear (W/L) & $p$ \\
+        comparison              & ratio & W/T/L   & clear (W/L) & $p$   \\
         \midrule
-        HashBoost vs XGBoost     & 1.016 & 14/0/12 & 1/6  & 0.98  \\
-        HashBoost vs ExtraTrees  & 0.904 & 18/0/8  & 9/5  & 0.11  \\
-        XGBoost vs ExtraTrees    & 0.890 & 20/0/6  & 13/3 & 0.031 \\
+        HashBoost vs XGBoost    & 1.016 & 14/0/12 & 1/6         & 0.98  \\
+        HashBoost vs ExtraTrees & 0.904 & 18/0/8  & 9/5         & 0.11  \\
+        XGBoost vs ExtraTrees   & 0.890 & 20/0/6  & 13/3        & 0.031 \\
         \bottomrule
     \end{tabular}
 \end{table}
@@ -536,11 +536,11 @@ does not show that two models are equal, so we also bound the gap: a 95\%
 $t$-interval over the 26 datasets' log error ratios gives a geometric-mean
 ratio between 0.97 and 1.07, so on average neither model's error is more than
 about 7\% above the other's\footnote{\label{fn:wisdm}One
-XGBoost run failed: WISDM's test fold 3 holds every series of two of its six
-classes, and XGBoost~3.4's intercept, estimated from a pool that lacks them,
-left it at test error 0.683. We report a rerun with the intercept fixed at
-0.5, the default before version 2.0 (0.178), with the original run's time.
-Counting the failed run, the ratio is 0.992 ($p = 0.71$).}. Where one model
+    XGBoost run failed: WISDM's test fold 3 holds every series of two of its six
+    classes, and XGBoost~3.4's intercept, estimated from a pool that lacks them,
+    left it at test error 0.683. We report a rerun with the intercept fixed at
+    0.5, the default before version 2.0 (0.178), with the original run's time.
+    Counting the failed run, the ratio is 0.992 ($p = 0.71$).}. Where one model
 clearly leads, it is usually XGBoost: on 6 datasets, including both S2Agri
 subsets and TimeSen2Crop (where HashBoost's error is 1.66 times XGBoost's),
 against 1 for HashBoost (AudioMNIST-DS). HashBoost also does better on the 10
@@ -609,7 +609,7 @@ training time on each fold, patience included, and chooses its round on tune
 error among those it completed. On validation error, HashBoost is then ahead on
 19 of the 26 datasets, and XGBoost's error is 1.35 times HashBoost's in
 geometric mean. That difference is not significant across all 26 (Wilcoxon $p
-= 0.24$), because on the cheaper datasets XGBoost finishes within HashBoost's
+    = 0.24$), because on the cheaper datasets XGBoost finishes within HashBoost's
 time anyway. The gap is concentrated where training is expensive: in
 HashBoost's time, XGBoost reaches 0.27 and 0.29 on the two S2Agri subsets,
 against HashBoost's 0.028 and 0.019, and 0.117 on TimeSen2Crop against 0.030.
@@ -705,14 +705,14 @@ average of random trees on small training sets, and a booster on large ones.
     \setlength{\tabcolsep}{5pt}
     \begin{tabular}{lrrrrrr}
         \toprule
-        model             & mean error      & median & mean rank     & W/T/L           & $p$                 & total fit    \\
+        model             & mean error      & median & mean rank     & W/T/L   & $p$                 & total fit \\
         \midrule
-        HashBoost         & 0.1941          & 0.1705 & 2.36          & --              & --                  & 183\,s       \\
-        ExtraTrees        & \textbf{0.1475} & 0.1205 & \textbf{1.25} & 8/8/96          & $2.6\times10^{-14}$ & 70\,s        \\
-        XGBoost           & 0.2101          & 0.1912 & 2.39          & 58/3/51         & 0.082               & 413\,s       \\
+        HashBoost         & 0.1941          & 0.1705 & 2.36          & --      & --                  & 183\,s    \\
+        ExtraTrees        & \textbf{0.1475} & 0.1205 & \textbf{1.25} & 8/8/96  & $2.6\times10^{-14}$ & 70\,s     \\
+        XGBoost           & 0.2101          & 0.1912 & 2.39          & 58/3/51 & 0.082               & 413\,s    \\
         \midrule
-        QUANT (published) & 0.1456          & 0.1177 &               & 13/5/94         & $4.9\times10^{-14}$ &              \\
-        HC2 (published)   & 0.1236          & 0.0753 &               & 8/7/97          & $3.8\times10^{-15}$ &              \\
+        QUANT (published) & 0.1456          & 0.1177 &               & 13/5/94 & $4.9\times10^{-14}$ &           \\
+        HC2 (published)   & 0.1236          & 0.0753 &               & 8/7/97  & $3.8\times10^{-15}$ &           \\
         \bottomrule
     \end{tabular}
 \end{table}
