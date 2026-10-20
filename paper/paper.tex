@@ -64,10 +64,10 @@
     the training set. We evaluate this model on MONSTER, a benchmark of 26 large time
     series datasets, using QUANT features. With both models tuned by the same
     procedure and scored on the official test folds, HashBoost matches tuned
-    XGBoost's accuracy and trains 8.2$\times$ faster in total on the same GPU: up to 31$\times$ faster on the larger datasets where
-    XGBoost is most expensive, though slower on the cheapest. On the small
-    datasets of the UCR archive the advantage disappears: QUANT's own
-    ExtraTrees classifier is both faster and more accurate there.
+    XGBoost's accuracy and trains 8.2$\times$ faster in total on the same GPU, and up to 31$\times$ faster on the larger datasets where
+    XGBoost is most expensive, though slower on the cheapest. However, the advantage disappears on the small
+    datasets of the UCR archive, where QUANT's own
+    ExtraTrees classifier is both faster and more accurate.
 \end{abstract}
 
 
@@ -151,14 +151,11 @@ HashBoost keeps this leaf rule and changes how examples are assigned to leaves.
 \paragraph{Oblivious trees and decision tables.}
 CatBoost~\cite{prokhorenkova2018catboost} grows \emph{oblivious} trees, in
 which every node at a given depth uses the same split, so a depth-$d$ tree is
-$d$ predicates indexing $2^d$ leaves. This is the structure of one HashBoost
-round, and neural oblivious ensembles~\cite{popov2020node} use it too. CatBoost
-chooses each level's split greedily by gain over the whole training set and
-fixes the leaves once the tree is built. Boosted decision
-tables~\cite{lou2017bdt} are the closest relative. They choose a table's tests
-greedily by gain over the whole training set, then \emph{backfit} them,
-re-choosing each test given the others. Their leaves are set once, and earlier
-tables are never revisited. HashBoost does the opposite on both counts. Its
+$d$ predicates indexing $2^d$ leaves: the structure of one HashBoost round.
+Boosted decision tables~\cite{lou2017bdt} are the closest relative. Like
+CatBoost, they choose each test greedily by gain over the whole training set
+(then \emph{backfit} them, re-choosing each test given the others), and set
+their leaves once without revisiting earlier tables. HashBoost does the opposite on both counts. Its
 tests are not searched for over the training set, and every earlier round's
 leaves are re-estimated by each later batch. That is closer to backfitting
 additive models~\cite{buja1989linear}, applied online.
@@ -166,10 +163,7 @@ additive models~\cite{buja1989linear}, applied online.
 \paragraph{Randomised partitions.}
 Random forests~\cite{breiman2001random} and extremely randomised
 trees~\cite{geurts2006extremely} showed that much of a tree's split search can
-be replaced by randomness, provided the ensemble is large. A random global
-partition can also be read as a locality-sensitive
-hash~\cite{indyk1998approximate}: examples that share a code agree on $b$
-random comparisons. HashBoost's thresholds are random but not uninformed. They
+be replaced by randomness, provided the ensemble is large. HashBoost's thresholds are random but not uninformed. They
 sit between two hard examples of different classes, so each bit tends to
 separate examples the current model confuses.
 
@@ -180,12 +174,11 @@ builds each tree's histograms in parallel, and out-of-core
 training~\cite{chen2016xgboost} pages the binned matrix from disk. Both still
 pass over the whole training set every round. Learning from a stream is the
 other route. Hoeffding trees~\cite{domingos2000mining} grow one tree from a
-stream, splitting a leaf once enough examples have arrived to choose its test
-with confidence, and online boosting~\cite{oza2001online,beygelzimer2015online}
-updates every weak learner as each example arrives. HashBoost is closest to
-online boosting: it updates all existing learners from each new batch. Unlike
-online boosting, its learners' structure is fixed when they are created, so an
-update is a scatter-add rather than a refit.
+stream, splitting a leaf once enough examples have arrived, and online
+boosting~\cite{oza2001online,beygelzimer2015online} updates every weak learner
+as each example arrives. Like online boosting, HashBoost updates all existing
+learners from each batch, but their structure is fixed when they are created, so
+an update is a scatter-add rather than a refit.
 
 \paragraph{Time series classification.}
 Random-feature methods have shown that data-dependent search can often be
@@ -769,7 +762,7 @@ ExtraTrees is both faster and more accurate.
 
 \section*{Acknowledgements}
 
-I thank Angus Dempster for supervising this project. This work was
+We thank Angus Dempster for supervising this project. This work was
 supported by the MASSIVE HPC facility (\url{www.massive.org.au}).
 
 \bibliographystyle{ieeetr}
