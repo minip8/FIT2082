@@ -155,7 +155,7 @@ $d$ predicates indexing $2^d$ leaves: the structure of one HashBoost round.
 Boosted decision tables~\cite{lou2017bdt} are the closest relative. Like
 CatBoost, they choose each test greedily by gain over the whole training set
 (then \emph{backfit} them, re-choosing each test given the others), and set
-their leaves once without revisiting earlier tables. HashBoost does the opposite on both counts. Its
+their leaves once without revisiting earlier tables. Conversely, HashBoost's
 tests are not searched for over the training set, and every earlier round's
 leaves are re-estimated by each later batch. That is closer to backfitting
 additive models~\cite{buja1989linear}, applied online.
@@ -233,7 +233,7 @@ time, the way CatBoost grows an oblivious tree level by level
 with the highest second-order gain, $\sum G^2/(H+\lambda)$ with $\lambda = 1$,
 summed over classes and over the cells the earlier bits have made. Here $G$
 and $H$ are the batch's gradient and hessian summed within a cell. Unlike
-CatBoost, it scores only these $bK$ random candidates, on one batch, rather
+CatBoost, HashBoost scores only these $bK$ random candidates, on one batch, rather
 than every feature over the whole training set.
 
 \subsection{Fitting the leaves}
@@ -300,20 +300,17 @@ rounds.
 \label{sec:implementation}
 
 HashBoost runs entirely on the GPU in PyTorch. The first implementation was a
-CPU prototype in numba, which we kept as a test oracle for the GPU version:
-given the same predicates, the two agree to $4\times10^{-7}$ in logits with
-identical predictions. The GPU version trains Pedestrian's default 800 rounds
-in about 7.5\,s, against 101.5\,s for the prototype.
+CPU prototype in numba, which we kept as a test oracle when porting to the GPU.
+The GPU version is about 13$\times$ faster.
 
 The code is organised so that an experiment can change one component at a
 time. The predicate family, the split selector and the loss are separate
 interfaces (Python \code{Protocol}s), and every experimental change is an
-opt-in option, so the default model stays the prototype's algorithm. On the GPU
-the greedy pairing of hard examples runs as a single Triton kernel, so a round
-needs no transfer back to the host, and a test checks that it chooses the same
-pairs as the Python version. The 224 tests also cover the QUANT port against
-its upstream reference. Every run writes its results to a file named after
-its commit, so every number here can be traced to the code that produced it.
+opt-in option, so the default model stays the prototype's algorithm.
+We also ported the QUANT transform to PyTorch, so features are computed on the
+GPU, next to the model that trains on them.
+
+After every run, we write the parameters and results to disk for reproducibility.
 
 % ==============================================================================
 \section{Experimental Setup}
@@ -401,21 +398,20 @@ screen (CrowdSourced's validation error fell from 0.042 to 0.006). Over five
 model seeds on fold 0, the same configuration was picked every time on 25 of
 the 26 datasets.
 
-We compare against one tree booster, tuned with the same effort as HashBoost:
-XGBoost, because it trains on the same GPU, so the times compare directly, and
-can train out of core (\cref{sec:memory}). On early 65,536-row slices,
-LightGBM's validation error was in the same range. XGBoost's screen raised its cap to 5,000 rounds with 100 rounds of patience,
+We compare against XGBoost, tuned with the same effort, because it trains on
+the same GPU, so the times compare directly, and it can train out of core
+(\cref{sec:memory}). Its screen raised the cap to 5,000 rounds with 100 rounds
+of patience,
 then varied depth, learning rate, subsampling, L2 regularisation and the
-number of bins. Its configurations are \code{d4} (depth 4, learning rate 0.1;
+number of bins. Its final configurations are \code{d4} (depth 4, learning rate 0.1;
 picked on 17 datasets) and \code{d8} (depth 8, learning rate 0.05, 64 bins;
-picked on 9). The third model, ExtraTrees with QUANT's own settings (200 trees,
-entropy criterion, a tenth of the features per split), chooses nothing after
-training, so it trains on the same rows and needs no tune slice.
+picked on 9). We also compare against ExtraTrees with QUANT's own
+settings (200 trees, entropy criterion, a tenth of the features per split).
 
 \paragraph{UCR.}
-For the small-data boundary we use the 112 univariate UCR
+To test on smaller datasets, we use the 112 univariate UCR
 datasets~\cite{dau2019ucr} that the bake-off reports
-on~\cite{middlehurst2024bakeoff}: the archive's 128, less the 15 with missing
+on~\cite{middlehurst2024bakeoff}: the archive's 128, minus the 15 with missing
 values or unequal lengths and Fungi, which has one training series per class.
 Each is used on its default train/test split. The training sets have 16 to 8,926 series (median 190). There is no validation split, so
 every model runs at fixed settings and we report test error: HashBoost at 800
@@ -424,13 +420,13 @@ defaults (100 rounds, learning rate 0.3, depth 6).
 
 \paragraph{Hardware and timing.}
 Every HashBoost and XGBoost run on MONSTER had one NVIDIA L40S (46\,GB) on
-Monash's M3 cluster to itself, so their times are directly comparable. ExtraTrees ran on
-CPU nodes with 36 cores, so its time is not comparable. Training time includes the QUANT
-transform for both boosters. UCR and the streaming runs in
+Monash's M3 cluster to itself, so their times are directly comparable, whereas
+ExtraTrees ran on
+CPU nodes with 36 cores. For timing, we included the QUANT transform cost.
+UCR and the streaming runs in
 \cref{sec:memory} used one RTX 4060 (8\,GB). Seeding does not make HashBoost
-reproducible, because float32 scatter-adds on the GPU accumulate in a
-nondeterministic order. On Pedestrian the run-to-run standard deviation of
-validation error is about 0.003.
+deterministic, since scatter-adds on the GPU accumulate in a
+nondeterministic order.
 
 % ==============================================================================
 \section{Results}
