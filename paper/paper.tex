@@ -306,11 +306,10 @@ The GPU version is about 13$\times$ faster.
 The code is organised so that an experiment can change one component at a
 time. The predicate family, the split selector and the loss are separate
 interfaces (Python \code{Protocol}s), and every experimental change is an
-opt-in option, so the default model stays the prototype's algorithm.
-We also ported the QUANT transform to PyTorch, so features are computed on the
-GPU, next to the model that trains on them.
-
-After every run, we write the parameters and results to disk for reproducibility.
+opt-in option, so the default model stays the prototype's algorithm, and
+every run writes its parameters and results to disk. We also ported the QUANT
+transform to PyTorch, so features are computed on the GPU, next to the model
+that trains on them.
 
 % ==============================================================================
 \section{Experimental Setup}
@@ -392,9 +391,7 @@ batches old, and freeze rounds older than 128 batches:
           batch. Picked on the largest pools (LenDB, both S2Agri, Traffic,
           Pedestrian), WhaleSounds and the EEG sets DREAMERA and DREAMERV.
 \end{itemize}
-Gain selection had not helped on 65,536-row slices, but on whole pools, with
-6-bit rounds and a heavy leaf penalty, it was the largest single gain in the
-screen (CrowdSourced's validation error fell from 0.042 to 0.006). Over five
+Over five
 model seeds on fold 0, the same configuration was picked every time on 25 of
 the 26 datasets.
 
@@ -437,10 +434,7 @@ nondeterministic order.
 
 \Cref{tab:monster} gives each model's test error on the 26 MONSTER datasets,
 averaged over the five test folds, with training times, and
-\cref{tab:monster-summary} summarises the pairwise comparisons. As a check,
-every model, reloaded for testing, reproduced the validation error it had
-recorded at its tune-chosen round, so test error was scored at the intended
-point.
+\cref{tab:monster-summary} summarises the pairwise comparisons.
 
 % src: results/test/fold{0-4}/*-{99fa5bc,580e549}.json and
 %      results/test/repaired; notebooks/monster.ipynb
@@ -554,7 +548,8 @@ pools such as MosquitoSound, AudioMNIST-DS and Pedestrian.
 Test error is about 3.3 times validation error for all three models, because
 the test folds differ in distribution from the pool that the validation and
 tune slices are drawn from. Every model is tuned on the same slices, so the
-comparison stays fair.
+comparison stays fair, though configurations chosen on validation error may
+not be the best on test.
 
 \subsection{Where the time goes (RQ2)}
 \label{sec:cost}
@@ -609,13 +604,11 @@ HashBoost's 0.02--0.03, with a similar gap on TimeSen2Crop.
 \end{figure}
 
 \paragraph{HashBoost's budget ran out on the largest pools.}
-Run to completion, XGBoost overtakes HashBoost on S2Agri and TimeSen2Crop,
-and those are among the datasets where it clearly leads on test. But HashBoost
-was stopped by its budget, not by its tune error: it reached its 5,000-batch
-cap on 14 of the 15 S2Agri and Traffic folds with its best tune error in the
-last 1,000 batches, still improving. On S2Agri-10pc-34 it reached its
-tune-chosen point in 375\,s, where XGBoost needed 12,661\,s. A larger budget
-would cost minutes, and might close part of that gap.
+Run to completion, XGBoost overtakes HashBoost on S2Agri and TimeSen2Crop.
+But HashBoost was stopped by its budget, not by its tune error: it reached its
+5,000-batch cap on 14 of the 15 S2Agri and Traffic folds with its best tune
+error in the last 1,000 batches, still improving. On TimeSen2Crop it reached
+the cap on only two folds of five.
 
 \paragraph{Memory does not grow with the training set.}
 \label{sec:memory}
@@ -634,9 +627,8 @@ Without freezing, per-batch cost grows with rounds: on a streamed Traffic run
 it rose from 2\,ms to 14.5\,ms over 2,840 rounds, while a window of one or two
 epochs' rounds held it level (\cref{fig:scaling}, left). On Pedestrian, with
 two rounds per batch, a window of ten epochs matched the unfrozen model's
-validation error (0.2135 against 0.2133, three runs each) in 2.4 times less
-time. Every MONSTER configuration
-freezes rounds older than 128 batches.
+validation error in 2.4 times less
+time.
 
 % src: notebooks/streaming.ipynb, section 6
 \begin{figure}[tbp]
@@ -713,12 +705,10 @@ Because the two models' costs scale differently, the speedup is largest where
 the classifier's cost was a problem, which is where HashBoost is meant to be
 used. There it also gives up the most accuracy once XGBoost has run to
 completion (its error is 1.12 times XGBoost's on S2Agri and 1.66 times on
-TimeSen2Crop), while being far ahead at equal time. On S2Agri, HashBoost
-stopped at its batch budget while still improving, so the trade-off is at
-least partly set by a budget tuned on smaller pools rather than by a ceiling
-of the model. On TimeSen2Crop it reached the budget on only two folds of
-five, so the budget explains less of that gap, the largest in the
-benchmark.
+TimeSen2Crop), while being far ahead at equal time. On S2Agri the trade-off
+is at least partly set by a budget tuned on smaller pools rather than by a
+ceiling of the model. On TimeSen2Crop the budget explains less of the gap, the
+largest in the benchmark.
 
 \paragraph{Limitations.}
 \begin{itemize}
@@ -730,13 +720,10 @@ benchmark.
     \item The time-matched comparison is on validation error, because test
           error was scored only at each model's own chosen round. XGBoost's
           clock is its build plus its mean time per round.
-    \item Configurations were chosen on validation error, which
-          underestimates test error about 3.3-fold, so they may not be the
-          best on test, for either model.
     \item The UCR results are one run on the default split, where the bake-off
           averages 30 resamples.
     \item The comparison includes XGBoost and ExtraTrees only, not LightGBM or
-          CatBoost, and ExtraTrees' CPU time is not directly comparable.
+          CatBoost.
 \end{itemize}
 
 \paragraph{Future work.}
@@ -744,8 +731,7 @@ The largest datasets suggest that a round budget that grows with the training
 pool would buy accuracy for minutes of training. A configuration tuned for
 speed rather than accuracy would map the trade-off on the test folds. Choosing
 the bit width from the number of rows per class could unify the UCR and
-MONSTER settings, and cheaper rounds would help on small datasets, where a
-round's cost is fixed overhead.
+MONSTER settings, and cheaper rounds would help on small datasets.
 
 % ==============================================================================
 \section{Conclusion}
