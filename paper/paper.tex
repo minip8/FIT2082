@@ -424,7 +424,8 @@ Monash's M3 cluster to itself, so their times are directly comparable, whereas
 ExtraTrees ran on
 CPU nodes with 36 cores. For timing, we included the QUANT transform cost.
 UCR and the streaming runs in
-\cref{sec:memory} used one RTX 4060 (8\,GB). Seeding does not make HashBoost
+\cref{sec:memory} used one RTX 4060 (8\,GB), with ExtraTrees on the same
+machine's 12-thread CPU. Seeding does not make HashBoost
 deterministic, since scatter-adds on the GPU accumulate in a
 nondeterministic order.
 
