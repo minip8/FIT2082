@@ -103,15 +103,17 @@ happen to be in the current batch. Its leaf values can be re-estimated from
 any later mini-batch, and the model never needs the whole training set in
 memory at once. Since nothing in a round depends on the size of the training
 set, HashBoost's cost stays flat on exactly the datasets where boosted trees
-become expensive. We ask three questions:
+become expensive.
+
+The aim of this project is to build such a booster and to test whether it
+can match tuned XGBoost's accuracy while training faster on large time
+series datasets. We ask three questions:
 \begin{description}
     \item[RQ1] Given the same tuning effort, does HashBoost match a tuned
           boosted tree ensemble's accuracy on MONSTER's test folds?
-    \item[RQ2] How much faster is HashBoost, on which datasets, and why? What does
-          each model reach in the same training time, and what memory
-          does each need?
-    \item[RQ3] Where does the advantage stop? Does it hold on small
-          training sets?
+    \item[RQ2] How do HashBoost's training time and memory compare with
+          XGBoost's, and what explains the difference?
+    \item[RQ3] Does the advantage still hold on small training sets?
 \end{description}
 
 \Cref{sec:method} describes HashBoost and its GPU implementation. We then
@@ -291,8 +293,22 @@ rounds.
 
 HashBoost runs entirely on the GPU in PyTorch, as does our port of the QUANT
 transform, so features are computed right next to the model that trains on
-them. Our first version, a CPU prototype in numba about 13$\times$ slower,
-is kept as a test oracle.
+them. We first wrote a CPU prototype in numba. The GPU version is about
+13$\times$ faster, and we kept the prototype as an independent reference
+implementation.
+
+The code is designed so that an experiment can change one component at a
+time. The predicate family, the split selector and the loss are separate
+interfaces (Python \code{Protocol}s), so a new splitter or objective can be
+swapped in without touching the rest of the model. Every experimental change
+is added as an opt-in option, which keeps the default model equal to the
+prototype's algorithm. That is what makes the prototype useful as a test
+oracle. A test suite of 224 tests replays the same hashes through both
+implementations and requires their predictions to agree within a tolerance,
+and it checks our GPU kernels and the QUANT port against their reference
+versions in the same way. Every run writes its configuration, data split and
+results to disk with the commit it ran from, so each number in this paper
+can be traced back to the code that produced it.
 
 % ==============================================================================
 \section{Experimental Setup}
