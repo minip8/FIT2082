@@ -129,7 +129,8 @@ In this work, we address the following three research questions:
           boosted tree ensemble's accuracy on MONSTER's test folds?
     \item[RQ2] How do HashBoost's training time and memory compare with
           XGBoost's, and what explains the difference?
-    \item[RQ3] Does the advantage still hold on small training sets?
+    \item[RQ3] Does HashBoost remain competitive in accuracy and speed on
+          small training sets?
 \end{description}
 We compare HashBoost against XGBoost, tuned by the same procedure, and
 against QUANT's ExtraTrees, on 26 MONSTER datasets with training pools of up
@@ -173,7 +174,8 @@ turn while the others are held fixed.
 
 Random forests~\cite{breiman2001random} and extremely randomised
 trees~\cite{geurts2006extremely} showed that, in a large enough ensemble,
-much of the split search can be replaced with randomness. The usual way to
+much of the split search can be replaced with randomness, which is the idea that
+HashBoost borrows for its splits. The usual way to
 scale tree boosting, though, is to keep the search and make it faster. GPU
 histogram construction~\cite{mitchell2017accelerating} builds each tree's
 histograms in parallel, and out-of-core training~\cite{chen2016xgboost}
@@ -262,8 +264,9 @@ between two examples that the model currently gets wrong, so it tends to
 separate examples that the model is confusing. The only search involved is
 the sort in the first step.
 
-We also evaluate a \emph{gain-selected} variant. The gain-selected variant
-draws a pool of $bK$ hard-pair candidates and fills the bits one at a time,
+We also evaluate a \emph{gain-selected} variant, because on the smaller
+pools the purely random choice of feature held HashBoost back
+(\cref{sec:discussion}). The gain-selected variant draws a pool of $bK$ hard-pair candidates and fills the bits one at a time,
 in the same way that CatBoost grows an oblivious tree level by level
 (\cref{sec:related}). Each new split takes the unused candidate with the
 highest second-order gain, $\sum G^2/(H+\lambda)$ with $\lambda = 1$, summed
@@ -340,7 +343,11 @@ fixed number of rounds per batch, $T$ batches cost $O(T^2)$. We address this
 through \emph{round freezing}. With a window of $W$ rounds, only the newest
 $W$ keep accumulating, and once a round is frozen its contribution to an
 example never changes. If each training example has a fixed id, its frozen
-contribution can be summed once and cached in an $(N, k)$ table. A batch then
+contribution can be summed once and cached in an $(N, k)$ table. This
+cache is the one part of HashBoost's memory that grows with $N$, but at four
+bytes per example and class it is small next to the data (8\,MB on LenDB,
+about 0.5\,GB on S2Agri-10pc-34), and the model can run without this cache at
+$O(R)$ cost per batch. A batch then
 costs $O(W + f)$ round updates, where $f$ is the number of rounds frozen
 since its examples were last seen, and the total cost becomes linear in the
 number of rounds.
@@ -612,7 +619,8 @@ HashBoost takes minutes.
 \paragraph{Equal training time.}
 We also compare the two boosters when XGBoost is limited to HashBoost's
 training time. In \cref{fig:monster-speed} (right), XGBoost gets exactly
-HashBoost's total training time on each fold, patience included, and its
+HashBoost's total training time on each fold, including the batches
+HashBoost ran after its best round before early stopping ended it, and its
 round is chosen on tune error from the rounds it completed in that time.
 Under this limit HashBoost
 is ahead on validation error on 19 of the 26 datasets. Across all 26 the
@@ -776,7 +784,8 @@ slices, so the comparison stays fair, but configurations chosen on
 validation error may not be the best on test. The time-matched comparison
 also uses validation error, since test error was scored only at each
 model's chosen round, and XGBoost's time there is estimated as its build
-time plus its mean time per round. Third, we compared against XGBoost and ExtraTrees only.
+time plus its mean time per round. Third, we compared against XGBoost and ExtraTrees only, not LightGBM or
+CatBoost.
 
 Several directions follow. A round budget that grows with the training pool
 should buy accuracy on the largest datasets for a few more minutes of
