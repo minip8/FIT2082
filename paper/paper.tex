@@ -123,6 +123,22 @@ round depends on the size of the training set, HashBoost's cost per round
 stays flat as the training set grows, which is exactly where boosted trees
 become expensive (\cref{fig:monster-time}).
 
+% src: notebooks/monster.ipynb
+\begin{figure}[tbp]
+    \centering
+    \includegraphics[width=\linewidth]{figures/monster_time.pdf}
+    \caption{Validation error against training time for the six largest
+        MONSTER training pools (fold 0, one L40S GPU, QUANT included). On
+        S2Agri, TimeSen2Crop and LenDB, HashBoost reaches a low error in a few
+        minutes, where XGBoost needs up to hours to reach the same error. Given
+        its full budget, XGBoost finishes slightly lower on S2Agri and
+        TimeSen2Crop. Each booster runs at its tuned configuration. HashBoost's
+        time is measured at each evaluation, XGBoost's is its build time plus
+        its mean time per round, and rings mark the point chosen on tune error.
+        The time axis is logarithmic.}
+    \label{fig:monster-time}
+\end{figure}
+
 In this work, we address the following three research questions:
 \begin{description}
     \item[RQ1] Given the same tuning effort, does HashBoost match a tuned
@@ -628,24 +644,8 @@ difference is not significant (Wilcoxon $p = 0.24$), because on the cheaper
 datasets XGBoost finishes within HashBoost's time anyway. Where training is
 expensive, however, the gap is large. Given HashBoost's time, XGBoost only
 reaches a validation error of 0.27--0.29 on the two S2Agri subsets, about ten
-times HashBoost's 0.02--0.03, and the gap on TimeSen2Crop is similar. \Cref{fig:monster-time}
-shows the curves for the six largest pools.
-
-% src: notebooks/monster.ipynb
-\begin{figure}[tbp]
-    \centering
-    \includegraphics[width=\linewidth]{figures/monster_time.pdf}
-    \caption{Validation error against training time for the six largest
-        MONSTER training pools (fold 0, one L40S GPU, QUANT included). On
-        S2Agri, TimeSen2Crop and LenDB, HashBoost reaches a low error in a few
-        minutes, where XGBoost needs up to hours to reach the same error. Given
-        its full budget, XGBoost finishes slightly lower on S2Agri and
-        TimeSen2Crop. Each booster runs at its tuned configuration. HashBoost's
-        time is measured at each evaluation, XGBoost's is its build time plus
-        its mean time per round, and rings mark the point chosen on tune error.
-        The time axis is logarithmic.}
-    \label{fig:monster-time}
-\end{figure}
+times HashBoost's 0.02--0.03, and the gap on TimeSen2Crop is similar. \Cref{fig:monster-time}, in the
+introduction, shows the curves for the six largest pools.
 
 \paragraph{Memory.}
 \label{sec:memory}
